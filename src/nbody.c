@@ -1,4 +1,5 @@
 #include "nbody.h"
+#include "gravity.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -31,16 +32,23 @@ bool simulate(Body *bodies, size_t count, double dt, size_t steps, Interaction f
             body->velocity.z += body->acceleration.z * dt;
         }
 
-        for (size_t i = 0; i < count; ++i) {
-            accelerations[i] = (Vec3){0.0, 0.0, 0.0};
-            for (size_t j = 0; j < count; ++j) {
-                if (i == j) {
-                    continue;
+        if (f == gravity) {
+            gravity_accelerations(bodies, count, accelerations);
+        } else {
+            for (size_t i = 0; i < count; ++i) {
+                double ax = 0.0;
+                double ay = 0.0;
+                double az = 0.0;
+                for (size_t j = 0; j < count; ++j) {
+                    if (i == j) {
+                        continue;
+                    }
+                    Vec3 contribution = f(&bodies[i], &bodies[j]);
+                    ax += contribution.x;
+                    ay += contribution.y;
+                    az += contribution.z;
                 }
-                Vec3 contribution = f(&bodies[i], &bodies[j]);
-                accelerations[i].x += contribution.x;
-                accelerations[i].y += contribution.y;
-                accelerations[i].z += contribution.z;
+                accelerations[i] = (Vec3){ax, ay, az};
             }
         }
 

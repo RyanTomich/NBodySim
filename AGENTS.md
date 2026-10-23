@@ -30,7 +30,12 @@ The application accepts `INPUT DT STEPS` and writes the final state to stdout.
 Use a different output filename from the input. Override compiler settings with
 commands such as `make CC=clang`; clean before changing compiler flags.
 All targets use `-O3 -g -fno-omit-frame-pointer`, with fast-math disabled and
-assertions enabled. Benchmark runs force a rebuild with this configuration.
+assertions enabled. Link-time optimization (`-flto`) defaults to `LTO=1` for
+every target and requires compiler/linker support; failures do not silently
+disable it. Use `make LTO=0` for a non-LTO build, cleaning before switching
+settings. `make print-config` reports the selected LTO setting and flags.
+Benchmark runs force a rebuild and inherit `LTO` from the environment; prefix
+the runner command with `LTO=0` for a non-LTO comparison.
 
 ## Running Benchmarks and Finding Results
 

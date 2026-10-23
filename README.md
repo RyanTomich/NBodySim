@@ -71,11 +71,18 @@ computed from the interaction law.
 
 ## Benchmarking and profiling
 
-All targets use one optimized configuration: `-O3 -g -fno-omit-frame-pointer`,
-with fast-math disabled and assertions enabled. `make` builds both the ordinary
+All targets use `-O3 -g -fno-omit-frame-pointer`, with fast-math disabled,
+assertions enabled, and link-time optimization (`-flto`) enabled by default.
+`make` builds both the ordinary
 application and a separate benchmark driver linked against the same simulator
 sources. The runner force-rebuilds these targets before each experiment and
 saves the compiler commands and flags in `build.stdout.log`.
+
+For a comparison without LTO, set `LTO=0` in the runner's environment:
+
+```sh
+LTO=0 python3 bench/run.py timing tests/data/1000.txt --dt 0.0001 --steps 10 --samples 30
+```
 
 Run these commands from the repository root. The runner builds the executable
 automatically; invoke it directly instead of wrapping `build/app` in `perf`,
@@ -245,6 +252,37 @@ stays in files. A failed mode or input produces a nonzero exit status, while
 results and explicit unsupported-platform statuses for Linux-only modes.
 `make clean` preserves `results/`. Avoid editing sources during an experiment.
 
+### Plot saved timings
+
+Install Matplotlib in a virtual environment, then run the root-level plotter:
+
+```sh
+python3 -m venv build/plot-venv
+build/plot-venv/bin/python -m pip install matplotlib
+build/plot-venv/bin/python plot_results.py
+```
+
+This reads every successful `timing/samples.csv` in `results/` and saves
+`plots/raw_time.png` and `plots/speedup.png`. Labels use the suffix after the run
+type: `c7a9d7e_20261023-160502.425884Z_timing_+Linking` becomes `+Linking`.
+Runs appear in chronological order. Each input gets a separate panel in the
+same two figures; failed timing runs are skipped with a message.
+
+Every sample appears as a faint dot with horizontal jitter. Separate markers show
+the arithmetic means, with error bars of ± one sample standard deviation and no
+lines connecting means. Speedup samples are the baseline's mean time divided by
+each measured time; the markers and error bars summarize those ratios.
+Baseline uncertainty is not propagated,
+and the baseline's own mean ratio can be slightly above 1 because of the
+reciprocal transformation. The default reference is the earliest run labelled
+`+Baseline` (or `Baseline`), otherwise the earliest run for that input. Override
+it with `--baseline LABEL` or a full result directory name. Use comparable `DT`
+and `STEPS` across experiments; these parameters are not saved in the timing
+CSVs. The script checks that each input matches the baseline's archived input.
+
+Use `--results-dir PATH` and `--output-dir PATH` to select other directories.
+Re-running replaces the two images; saved benchmark results are unchanged.
+
 ## Simulation and interaction interface
 
 `src/nbody.h` defines `Vec3`, `Body`, and the callback interface:
@@ -258,15 +296,18 @@ bool simulate(Body *bodies, size_t count, double dt, size_t steps, Interaction f
 `Body` contains `w`, `position`, `velocity`, and `acceleration`. The simulator
 updates the array in place. `f(target, source)` reads two bodies and returns the
 source's contribution to the target's acceleration. It must not mutate state.
-Pass a different callback to replace gravity; the simulation loop does not
-interpret `w` or know the force law. The file reader enforces positive weights
-because this executable uses masses.
+When `f == gravity`, the simulator uses `gravity_accelerations` to evaluate each
+unordered pair once, sharing its displacement and distance between both bodies.
+Pass a different callback to use the generic ordered-pair loop. Gravity
+calculations remain in the gravity module. The file reader enforces positive
+weights because this executable uses masses.
 
 Each step performs these operations in order:
 
 1. Update all positions using `position += velocity * dt`.
 2. Update all velocities using `velocity += acceleration * dt`.
-3. Sum `f(target, source)` over all other bodies for each target.
+3. Accumulate accelerations in separate workspace using the gravity kernel or
+   the supplied callback.
 4. Assign the summed accelerations after all pairs have been evaluated.
 
 Steps 1 and 2 are implemented together per body, before any interaction calls.
@@ -280,6 +321,9 @@ the previous acceleration values consistently for every body.
 Contributions are combined by vector addition in increasing source-index order.
 Mathematically this reduction is associative and commutative; floating-point
 roundoff can make results depend on order.
+The gravity kernel weights the shared vector by each source mass separately.
+Its arithmetic can round differently from two calls to `gravity`; bitwise
+equivalence is not guaranteed.
 
 `src/gravity.c` implements Newtonian gravity with normalized units, `G = 1`:
 
@@ -326,5 +370,17 @@ The Makefile discovers application C sources directly under `src/`, unit tests
 directly under `tests/`, and benchmark sources directly under `bench/`.
 Override `CC`, `CFLAGS`, `CPPFLAGS`, `LDFLAGS`, or `LDLIBS` as needed; mandatory
 optimization/debug/frame-pointer flags are appended to `CFLAGS` for every target.
-Run `make clean` before manual builds with different compiler settings; the
-benchmark runner always forces a fresh build.
+LTO defaults to `LTO=1` and adds `-flto` to the combined compile-and-link command
+for every target. The compiler and linker must support LTO; a failure is reported
+without silently disabling it. To build with an unsupported toolchain or compare
+against the non-LTO configuration, use:
+
+```sh
+make clean
+make LTO=0
+```
+
+Run `make clean` before manual builds with different compiler settings, including
+switching `LTO` between `0` and `1`; the benchmark runner always forces a fresh
+build. Use `make print-config` (or `make LTO=0 print-config`) to inspect the
+selected configuration. The simulation and callback interfaces are unchanged.

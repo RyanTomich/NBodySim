@@ -1,6 +1,15 @@
 CC ?= cc
+LTO ?= 1
+ifeq ($(LTO),1)
+LTO_FLAGS := -flto
+else ifeq ($(LTO),0)
+LTO_FLAGS :=
+else
+$(error LTO must be 0 or 1)
+endif
+
 CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic
-override CFLAGS += -O3 -g -fno-omit-frame-pointer -fno-fast-math -UNDEBUG
+override CFLAGS += -O3 -g -fno-omit-frame-pointer -fno-fast-math -UNDEBUG $(LTO_FLAGS)
 LDLIBS += -lm
 PYTHON ?= python3
 
@@ -35,7 +44,8 @@ test: all build/tests build/bench-test
 	$(PYTHON) -m unittest discover -s tests/bench -v
 
 print-config:
-	@printf '%s\n' 'CC=$(CC)' 'CPPFLAGS=$(CPPFLAGS)' 'CFLAGS=$(CFLAGS)' 'LDFLAGS=$(LDFLAGS)' 'LDLIBS=$(LDLIBS)'
+	@printf '%s\n' 'CC=$(CC)' 'LTO=$(LTO)' 'LTO_FLAGS=$(LTO_FLAGS)' \
+	    'CPPFLAGS=$(CPPFLAGS)' 'CFLAGS=$(CFLAGS)' 'LDFLAGS=$(LDFLAGS)' 'LDLIBS=$(LDLIBS)'
 
 clean:
 	rm -rf build
