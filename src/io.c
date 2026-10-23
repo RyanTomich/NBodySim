@@ -46,37 +46,33 @@ static bool read_token(FILE *input, char token[128])
     return next == EOF ? !ferror(input) : isspace((unsigned char)next) != 0;
 }
 
-bool read_bodies(FILE *input, Body **bodies, size_t *count)
+bool read_bodies(FILE *input, Simulation *simulation)
 {
     char token[128];
     size_t n;
-    *bodies = NULL;
-    *count = 0;
-    if (!read_token(input, token) || !parse_size(token, &n)
-        || n > SIZE_MAX / sizeof(Body)) {
+    *simulation = (Simulation){0};
+    if (!read_token(input, token) || !parse_size(token, &n)) {
         return false;
     }
 
-    Body *result = n == 0 ? NULL : malloc(n * sizeof(*result));
-    if (n != 0 && !result) {
+    Simulation result;
+    if (!simulation_create(&result, n)) {
         return false;
     }
     for (size_t i = 0; i < n; ++i) {
-        Body *body = &result[i];
         double *fields[] = {
-            &body->w,
-            &body->position.x, &body->position.y, &body->position.z,
-            &body->velocity.x, &body->velocity.y, &body->velocity.z,
-            &body->acceleration.x, &body->acceleration.y, &body->acceleration.z
+            &result.w[i], &result.x[i], &result.y[i], &result.z[i],
+            &result.vx[i], &result.vy[i], &result.vz[i],
+            &result.ax[i], &result.ay[i], &result.az[i]
         };
         for (size_t field = 0; field < sizeof(fields) / sizeof(fields[0]); ++field) {
             if (!read_token(input, token) || !parse_double(token, fields[field])) {
-                free(result);
+                free(result.storage);
                 return false;
             }
         }
-        if (body->w <= 0.0) {
-            free(result);
+        if (result.w[i] <= 0.0) {
+            free(result.storage);
             return false;
         }
     }
@@ -86,26 +82,23 @@ bool read_bodies(FILE *input, Body **bodies, size_t *count)
         next = fgetc(input);
     } while (next != EOF && isspace((unsigned char)next));
     if (next != EOF || ferror(input)) {
-        free(result);
+        free(result.storage);
         return false;
     }
-    *bodies = result;
-    *count = n;
+    *simulation = result;
     return true;
 }
 
-bool write_bodies(FILE *output, const Body *bodies, size_t count)
+bool write_bodies(FILE *output, const Simulation *simulation)
 {
-    if (fprintf(output, "%zu\n", count) < 0) {
+    if (fprintf(output, "%zu\n", simulation->count) < 0) {
         return false;
     }
-    for (size_t i = 0; i < count; ++i) {
-        const Body *body = &bodies[i];
+    for (size_t i = 0; i < simulation->count; ++i) {
         if (fprintf(output, "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n",
-                    body->w,
-                    body->position.x, body->position.y, body->position.z,
-                    body->velocity.x, body->velocity.y, body->velocity.z,
-                    body->acceleration.x, body->acceleration.y, body->acceleration.z) < 0) {
+                    simulation->w[i], simulation->x[i], simulation->y[i], simulation->z[i],
+                    simulation->vx[i], simulation->vy[i], simulation->vz[i],
+                    simulation->ax[i], simulation->ay[i], simulation->az[i]) < 0) {
             return false;
         }
     }

@@ -4,7 +4,8 @@
 
 This is a serial C17 3D N-body simulator with O(n²) work per step.
 
-- `src/nbody.h` and `src/nbody.c` define body types and simulation logic.
+- `src/nbody.h` and `src/nbody.c` define array state types and simulation logic;
+  `src/state.c` allocates their storage and constructs read-only views.
 - `src/gravity.*` implements gravity; `src/io.*` handles instance files.
 - `src/main.c` parses CLI arguments and selects the interaction callback.
 - `tests/test_main.c` contains unit tests; `tests/test_cli.sh` checks CLI behavior.
@@ -42,6 +43,8 @@ the runner command with `LTO=0` for a non-LTO comparison.
 Run from the repository root using Python 3.8+ and a checkout with a valid Git
 commit. Use the runner so only `simulate(...)` is measured; do not profile the
 ordinary application's loading and output by wrapping `build/app` in perf.
+State/workspace allocation, parsing, reset, validation, and output stay outside
+the measured call; `simulate` performs no allocation or conversion.
 
 ```sh
 # Timing: macOS or Linux; mean and sample variance over 30 runs.
@@ -106,6 +109,11 @@ source body's acceleration contribution without mutating state. Preserve forward
 Euler ordering: input accelerations drive the first step, and newly computed
 accelerations are assigned only after all pairs are evaluated. Preserve the
 instance format: body count followed by `w x y z vx vy vz ax ay az` rows.
+`Simulation` owns thirteen contiguous arrays, each of length `count`, in one
+allocation. Construct it with `simulation_create` and release `storage` with
+`free`. Initialize the ten state arrays before calling `simulate`; its three
+workspace arrays are overwritten. Validate input and allocation sizes at the
+boundary; `simulate` trusts the storage, timestep, and callback contracts.
 
 ## Testing Guidelines
 

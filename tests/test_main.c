@@ -8,6 +8,50 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* AoS exists only in test fixtures and the independent reference solver. */
+typedef struct {
+    double w;
+    Vec3 position, velocity, acceleration;
+} ReferenceBody;
+
+static Simulation from_bodies(const ReferenceBody *bodies, size_t count)
+{
+    Simulation simulation;
+    assert(simulation_create(&simulation, count));
+    for (size_t i = 0; i < count; ++i) {
+        simulation.w[i] = bodies[i].w;
+        simulation.x[i] = bodies[i].position.x;
+        simulation.y[i] = bodies[i].position.y;
+        simulation.z[i] = bodies[i].position.z;
+        simulation.vx[i] = bodies[i].velocity.x;
+        simulation.vy[i] = bodies[i].velocity.y;
+        simulation.vz[i] = bodies[i].velocity.z;
+        simulation.ax[i] = bodies[i].acceleration.x;
+        simulation.ay[i] = bodies[i].acceleration.y;
+        simulation.az[i] = bodies[i].acceleration.z;
+        /* Neither kernel may depend on previously initialized workspace. */
+        simulation.next_ax[i] = NAN;
+        simulation.next_ay[i] = NAN;
+        simulation.next_az[i] = NAN;
+    }
+    return simulation;
+}
+
+static ReferenceBody view_body(const SimulationView *state, size_t i)
+{
+    return (ReferenceBody){
+        state->w[i], {state->x[i], state->y[i], state->z[i]},
+        {state->vx[i], state->vy[i], state->vz[i]},
+        {state->ax[i], state->ay[i], state->az[i]}
+    };
+}
+
+static ReferenceBody body_at(const Simulation *simulation, size_t i)
+{
+    SimulationView view = simulation_view(simulation);
+    return view_body(&view, i);
+}
+
 static void assert_vec(Vec3 actual, Vec3 expected)
 {
     assert(fabs(actual.x - expected.x) < 1e-12);
@@ -15,7 +59,7 @@ static void assert_vec(Vec3 actual, Vec3 expected)
     assert(fabs(actual.z - expected.z) < 1e-12);
 }
 
-static void assert_body_equal(Body actual, Body expected)
+static void assert_body_equal(ReferenceBody actual, ReferenceBody expected)
 {
     assert(actual.w == expected.w);
     assert(actual.position.x == expected.position.x);
@@ -31,51 +75,69 @@ static void assert_body_equal(Body actual, Body expected)
 
 static void test_gravity(void)
 {
-    Body target = {.w = 7.0, .position = {1.0, 1.0, 1.0}};
-    Body source = {.w = 27.0, .position = {2.0, 3.0, 3.0}};
-    assert_vec(gravity(&target, &source), (Vec3){1.0, 2.0, 2.0});
+    const ReferenceBody initial[] = {
+        {.w = 7.0, .position = {1.0, 1.0, 1.0}},
+        {.w = 27.0, .position = {2.0, 3.0, 3.0}}
+    };
+    Simulation simulation = from_bodies(initial, 2);
+    SimulationView state = simulation_view(&simulation);
+    assert_vec(gravity(&state, 0, 1), (Vec3){1.0, 2.0, 2.0});
 
-    target.w = 99.0; /* Acceleration does not depend on target mass. */
-    assert_vec(gravity(&target, &source), (Vec3){1.0, 2.0, 2.0});
-    source.w = 54.0;
-    assert_vec(gravity(&target, &source), (Vec3){2.0, 4.0, 4.0});
+    simulation.w[0] = 99.0; /* Acceleration does not depend on target mass. */
+    assert_vec(gravity(&state, 0, 1), (Vec3){1.0, 2.0, 2.0});
+    simulation.w[1] = 54.0;
+    assert_vec(gravity(&state, 0, 1), (Vec3){2.0, 4.0, 4.0});
 
-    source.w = 27.0;
-    source.position = (Vec3){3.0, 5.0, 5.0}; /* Twice the distance. */
-    assert_vec(gravity(&target, &source), (Vec3){0.25, 0.5, 0.5});
-    source.position = (Vec3){0.0, -1.0, -1.0};
-    assert_vec(gravity(&target, &source), (Vec3){-1.0, -2.0, -2.0});
+    simulation.w[1] = 27.0;
+    simulation.x[1] = 3.0; /* Twice the distance. */
+    simulation.y[1] = 5.0;
+    simulation.z[1] = 5.0;
+    assert_vec(gravity(&state, 0, 1), (Vec3){0.25, 0.5, 0.5});
+    simulation.x[1] = 0.0;
+    simulation.y[1] = -1.0;
+    simulation.z[1] = -1.0;
+    assert_vec(gravity(&state, 0, 1), (Vec3){-1.0, -2.0, -2.0});
 
-    source.position = target.position;
-    assert_vec(gravity(&target, &source), (Vec3){0.0, 0.0, 0.0});
+    simulation.x[1] = simulation.x[0];
+    simulation.y[1] = simulation.y[0];
+    simulation.z[1] = simulation.z[0];
+    assert_vec(gravity(&state, 0, 1), (Vec3){0.0, 0.0, 0.0});
+    free(simulation.storage);
 }
 
 static void test_euler(void)
 {
-    Body body = {
+    ReferenceBody body = {
         .w = 1.0,
         .position = {1.0, 2.0, 3.0},
         .velocity = {4.0, 5.0, 6.0},
         .acceleration = {2.0, 4.0, 6.0}
     };
-    assert(simulate(&body, 1, 0.25, 1, gravity));
+    Simulation simulation = from_bodies(&body, 1);
+    simulate(&simulation, 0.25, 1, gravity);
+    body = body_at(&simulation, 0);
     assert_vec(body.position, (Vec3){2.0, 3.25, 4.5});
     assert_vec(body.velocity, (Vec3){4.5, 6.0, 7.5});
     assert_vec(body.acceleration, (Vec3){0.0, 0.0, 0.0});
 
-    assert(simulate(&body, 1, 0.25, 2, gravity));
+    simulate(&simulation, 0.25, 2, gravity);
+    body = body_at(&simulation, 0);
+    free(simulation.storage);
     assert_vec(body.position, (Vec3){4.25, 6.25, 8.25});
     assert_vec(body.velocity, (Vec3){4.5, 6.0, 7.5});
 }
 
 static void test_input_acceleration(void)
 {
-    Body bodies[] = {
+    ReferenceBody bodies[] = {
         {.w = 1.0, .position = {0.0, 0.0, 0.0}, .acceleration = {1.0, 0.0, 0.0}},
         {.w = 1.0, .position = {2.0, 0.0, 0.0}, .acceleration = {-1.0, 0.0, 0.0}}
     };
-    Body together[] = {bodies[0], bodies[1]};
-    assert(simulate(bodies, 2, 0.5, 1, gravity));
+    Simulation simulation = from_bodies(bodies, 2);
+    Simulation together = from_bodies(bodies, 2);
+    simulate(&simulation, 0.5, 1, gravity);
+    bodies[0] = body_at(&simulation, 0);
+    bodies[1] = body_at(&simulation, 1);
     assert_vec(bodies[0].position, (Vec3){0.0, 0.0, 0.0});
     assert_vec(bodies[1].position, (Vec3){2.0, 0.0, 0.0});
     assert_vec(bodies[0].velocity, (Vec3){0.5, 0.0, 0.0});
@@ -83,7 +145,9 @@ static void test_input_acceleration(void)
     assert_vec(bodies[0].acceleration, (Vec3){0.25, 0.0, 0.0});
     assert_vec(bodies[1].acceleration, (Vec3){-0.25, 0.0, 0.0});
 
-    assert(simulate(bodies, 2, 0.5, 1, gravity));
+    simulate(&simulation, 0.5, 1, gravity);
+    bodies[0] = body_at(&simulation, 0);
+    bodies[1] = body_at(&simulation, 1);
     assert_vec(bodies[0].position, (Vec3){0.25, 0.0, 0.0});
     assert_vec(bodies[1].position, (Vec3){1.75, 0.0, 0.0});
     assert_vec(bodies[0].velocity, (Vec3){0.625, 0.0, 0.0});
@@ -91,13 +155,14 @@ static void test_input_acceleration(void)
     assert_vec(bodies[0].acceleration, (Vec3){4.0 / 9.0, 0.0, 0.0});
     assert_vec(bodies[1].acceleration, (Vec3){-4.0 / 9.0, 0.0, 0.0});
 
-    assert(simulate(together, 2, 0.5, 2, gravity));
-    assert_body_equal(together[0], bodies[0]);
-    assert_body_equal(together[1], bodies[1]);
+    simulate(&together, 0.5, 2, gravity);
+    assert_body_equal(body_at(&together, 0), bodies[0]);
+    assert_body_equal(body_at(&together, 1), bodies[1]);
+    free(simulation.storage);
+    free(together.storage);
 }
 
-static const Body *observed_bodies;
-static const Body snapshot[] = {
+static const ReferenceBody snapshot[] = {
     {1.0, {0.5, 2.0, 3.5}, {6.0, 12.0, 18.0}, {10.0, 20.0, 30.0}},
     {2.0, {5.0, 6.5, 8.0}, {24.0, 30.0, 36.0}, {40.0, 50.0, 60.0}},
     {3.0, {9.5, 11.0, 12.5}, {42.0, 48.0, 54.0}, {70.0, 80.0, 90.0}}
@@ -105,26 +170,32 @@ static const Body snapshot[] = {
 static size_t calls;
 static unsigned pair_visits[3][3];
 
-static Vec3 custom_interaction(const Body *target, const Body *source)
+static Vec3 custom_interaction(const SimulationView *state, size_t target, size_t source)
 {
     assert(target != source);
+    assert(state->count == 3);
+    assert(calls == target * 2 + (source < target ? source : source - 1));
     ++calls;
-    ++pair_visits[target - observed_bodies][source - observed_bodies];
+    ++pair_visits[target][source];
     for (size_t i = 0; i < 3; ++i) {
-        assert_body_equal(observed_bodies[i], snapshot[i]);
+        assert_body_equal(view_body(state, i), snapshot[i]);
     }
-    return (Vec3){source->w, source->velocity.y, source->acceleration.z};
+    return (Vec3){state->w[source], state->vy[source], state->az[source]};
 }
 
 static void test_callback_snapshot(void)
 {
-    Body bodies[] = {
+    ReferenceBody bodies[] = {
         {1.0, {0.0, 1.0, 2.0}, {1.0, 2.0, 3.0}, {10.0, 20.0, 30.0}},
         {2.0, {3.0, 4.0, 5.0}, {4.0, 5.0, 6.0}, {40.0, 50.0, 60.0}},
         {3.0, {6.0, 7.0, 8.0}, {7.0, 8.0, 9.0}, {70.0, 80.0, 90.0}}
     };
-    observed_bodies = bodies;
-    assert(simulate(bodies, 3, 0.5, 1, custom_interaction));
+    Simulation simulation = from_bodies(bodies, 3);
+    simulate(&simulation, 0.5, 1, custom_interaction);
+    for (size_t i = 0; i < 3; ++i) {
+        bodies[i] = body_at(&simulation, i);
+    }
+    free(simulation.storage);
     assert(calls == 3 * 2);
     for (size_t i = 0; i < 3; ++i) {
         for (size_t j = 0; j < 3; ++j) {
@@ -136,24 +207,412 @@ static void test_callback_snapshot(void)
     assert_vec(bodies[2].acceleration, (Vec3){3.0, 42.0, 90.0});
 }
 
-static void test_zero_steps_and_arguments(void)
-{
-    Body body = {2.0, {1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}, {7.0, 8.0, 9.0}};
-    Body original = body;
-    size_t previous_calls = calls;
-    assert(simulate(&body, 1, 0.1, 0, custom_interaction));
-    assert_body_equal(body, original);
-    assert(simulate(NULL, 0, 0.1, 10, custom_interaction));
-    assert(calls == previous_calls);
+static ReferenceBody acceleration_snapshots[4][3];
+static size_t acceleration_calls;
 
-    assert(!simulate(NULL, 1, 0.1, 1, gravity));
-    assert(!simulate(&body, 1, 0.0, 1, gravity));
-    assert(!simulate(&body, 1, -0.1, 1, gravity));
-    assert(!simulate(&body, 1, NAN, 1, gravity));
-    assert(!simulate(&body, 1, INFINITY, 1, gravity));
-    assert(!simulate(&body, 1, 0.1, 1, NULL));
-    assert(!simulate(&body, SIZE_MAX, 0.1, 1, gravity));
-    assert_body_equal(body, original);
+static Vec3 acceleration_interaction(const SimulationView *state, size_t target, size_t source)
+{
+    size_t step = acceleration_calls / 6;
+    assert(step < 4 && state->count == 3 && target != source);
+    assert(acceleration_calls % 6 == target * 2 + (source < target ? source : source - 1));
+    ++acceleration_calls;
+    for (size_t i = 0; i < 3; ++i) {
+        assert_body_equal(view_body(state, i), acceleration_snapshots[step][i]);
+    }
+    return (Vec3){state->ax[source], state->ay[source], state->az[source]};
+}
+
+static void test_callback_multiple_steps(void)
+{
+    const double dt = 0.5;
+    for (size_t steps = 3; steps <= 4; ++steps) {
+        ReferenceBody expected[3];
+        for (size_t i = 0; i < 3; ++i) {
+            expected[i] = snapshot[i];
+        }
+        /* Independently compute each full callback snapshot before any sums. */
+        for (size_t step = 0; step < steps; ++step) {
+            for (size_t i = 0; i < 3; ++i) {
+                ReferenceBody *body = &expected[i];
+                body->position.x += body->velocity.x * dt;
+                body->position.y += body->velocity.y * dt;
+                body->position.z += body->velocity.z * dt;
+                body->velocity.x += body->acceleration.x * dt;
+                body->velocity.y += body->acceleration.y * dt;
+                body->velocity.z += body->acceleration.z * dt;
+                acceleration_snapshots[step][i] = *body;
+            }
+            for (size_t i = 0; i < 3; ++i) {
+                Vec3 sum = {0.0, 0.0, 0.0};
+                for (size_t j = 0; j < 3; ++j) {
+                    if (i != j) {
+                        Vec3 contribution = acceleration_snapshots[step][j].acceleration;
+                        sum.x += contribution.x;
+                        sum.y += contribution.y;
+                        sum.z += contribution.z;
+                    }
+                }
+                expected[i].acceleration = sum;
+            }
+        }
+
+        Simulation together = from_bodies(snapshot, 3);
+        Simulation separate = from_bodies(snapshot, 3);
+        acceleration_calls = 0;
+        simulate(&together, dt, steps, acceleration_interaction);
+        assert(acceleration_calls == 6 * steps);
+        acceleration_calls = 0;
+        for (size_t step = 0; step < steps; ++step) {
+            simulate(&separate, dt, 1, acceleration_interaction);
+        }
+        assert(acceleration_calls == 6 * steps);
+        for (size_t i = 0; i < 3; ++i) {
+            assert_body_equal(body_at(&together, i), expected[i]);
+            assert_body_equal(body_at(&separate, i), expected[i]);
+        }
+        free(together.storage);
+        free(separate.storage);
+    }
+}
+
+static void test_construction_and_noops(void)
+{
+    ReferenceBody original = {2.0, {1.0, 2.0, 3.0}, {4.0, 5.0, 6.0}, {7.0, 8.0, 9.0}};
+    Simulation simulation = from_bodies(&original, 1);
+    size_t previous_calls = calls;
+    simulate(&simulation, 0.1, 0, custom_interaction);
+    assert_body_equal(body_at(&simulation, 0), original);
+    free(simulation.storage);
+
+    assert(simulation_create(&simulation, 0));
+    assert(simulation.count == 0 && simulation.storage == NULL);
+    assert(simulation.w == NULL && simulation.next_az == NULL);
+    simulate(&simulation, 0.1, 10, custom_interaction);
+    simulate(&simulation, 0.1, 10, gravity);
+    assert(calls == previous_calls);
+    free(simulation.storage);
+
+    assert(!simulation_create(&simulation, SIZE_MAX));
+    assert(simulation.count == 0 && simulation.storage == NULL);
+    assert(!simulation_create(&simulation, SIZE_MAX / (13 * sizeof(double)) + 1));
+    assert(simulation.count == 0 && simulation.storage == NULL);
+}
+
+static Vec3 reference_gravity(const ReferenceBody *target, const ReferenceBody *source)
+{
+    double dx = source->position.x - target->position.x;
+    double dy = source->position.y - target->position.y;
+    double dz = source->position.z - target->position.z;
+    double r2 = dx * dx + dy * dy + dz * dz;
+    if (r2 == 0.0) {
+        return (Vec3){0.0, 0.0, 0.0};
+    }
+    double scale = source->w / (r2 * sqrt(r2));
+    return (Vec3){scale * dx, scale * dy, scale * dz};
+}
+
+/* Force the generic callback path, independent of the unordered-pair kernel. */
+static Vec3 gravity_callback(const SimulationView *state, size_t target, size_t source)
+{
+    return gravity(state, target, source);
+}
+
+enum { MAX_REFERENCE_BODIES = 69 };
+
+static const size_t reference_counts[] = {
+    0, 1, 2, 3, 31, 32, 33, 67, MAX_REFERENCE_BODIES
+};
+
+static void fill_reference_bodies(ReferenceBody *bodies, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        bodies[i] = (ReferenceBody){
+            .w = 0.5 + 0.25 * (double)(i % 11),
+            .position = {1.25 * (double)i, (double)(i % 7) - 3.0,
+                         (double)(i % 5) - 2.0},
+            .velocity = {0.01 * (double)(i % 3), -0.02, 0.03},
+            .acceleration = {-0.04, 0.05 * (double)(i % 4), 0.06}
+        };
+    }
+    if (count > 2) {
+        /* Coincident unequal-mass bodies remain coincident through the update. */
+        bodies[2].position = bodies[1].position;
+        bodies[2].velocity = bodies[1].velocity;
+        bodies[2].acceleration = bodies[1].acceleration;
+    }
+}
+
+static void test_gravity_accelerations(void)
+{
+    ReferenceBody bodies[MAX_REFERENCE_BODIES];
+    double output[3][MAX_REFERENCE_BODIES + 2];
+    for (size_t case_index = 0; case_index < sizeof(reference_counts) / sizeof(reference_counts[0]); ++case_index) {
+        const size_t count = reference_counts[case_index];
+        fill_reference_bodies(bodies, count);
+        Simulation simulation = from_bodies(bodies, count);
+        SimulationView state = simulation_view(&simulation);
+        for (size_t axis = 0; axis < 3; ++axis) {
+            output[axis][0] = -12345.0;
+            for (size_t i = 0; i < count; ++i) {
+                output[axis][i + 1] = NAN;
+            }
+            output[axis][count + 1] = 67890.0;
+        }
+        gravity_accelerations(&state, output[0] + 1, output[1] + 1, output[2] + 1);
+        for (size_t i = 0; i < count; ++i) {
+            Vec3 expected = {0.0, 0.0, 0.0};
+            for (size_t j = 0; j < count; ++j) {
+                if (i == j) {
+                    continue;
+                }
+                Vec3 contribution = reference_gravity(&bodies[i], &bodies[j]);
+                expected.x += contribution.x;
+                expected.y += contribution.y;
+                expected.z += contribution.z;
+            }
+            assert_vec((Vec3){output[0][i + 1], output[1][i + 1], output[2][i + 1]}, expected);
+            assert_body_equal(body_at(&simulation, i), bodies[i]);
+            assert(isnan(simulation.next_ax[i]));
+            assert(isnan(simulation.next_ay[i]));
+            assert(isnan(simulation.next_az[i]));
+        }
+        for (size_t axis = 0; axis < 3; ++axis) {
+            assert(output[axis][0] == -12345.0);
+            assert(output[axis][count + 1] == 67890.0);
+        }
+        if (count == 0) {
+            gravity_accelerations(&state, NULL, NULL, NULL);
+        }
+        free(simulation.storage);
+    }
+}
+
+static void test_gravity_workspace_initialization(void)
+{
+    const ReferenceBody initial[] = {
+        {.w = 1.0, .position = {0.0, -0.0, 0.0}},
+        {.w = 2.0, .position = {0.0, 0.0, -0.0}},
+        {.w = 4.0, .position = {2.0, 0.0, 0.0}}
+    };
+    for (size_t count = 1; count <= 3; ++count) {
+        Simulation simulation = from_bodies(initial, count);
+        SimulationView state = simulation_view(&simulation);
+        gravity_accelerations(&state, simulation.next_ax, simulation.next_ay,
+                              simulation.next_az);
+        for (size_t i = 0; i < count; ++i) {
+            double expected_x = count < 3 ? 0.0 : (i < 2 ? 1.0 : -0.75);
+            assert(simulation.next_ax[i] == expected_x);
+            assert(simulation.next_ay[i] == 0.0 && !signbit(simulation.next_ay[i]));
+            assert(simulation.next_az[i] == 0.0 && !signbit(simulation.next_az[i]));
+            assert_body_equal(body_at(&simulation, i), initial[i]);
+            simulation.x[i] = 0.0;
+        }
+        /* All pairs now coincide. Overwrite the preceding finite results,
+         * including the first target and the single-body case. */
+        gravity_accelerations(&state, simulation.next_ax, simulation.next_ay,
+                              simulation.next_az);
+        for (size_t i = 0; i < count; ++i) {
+            assert(simulation.next_ax[i] == 0.0 && !signbit(simulation.next_ax[i]));
+            assert(simulation.next_ay[i] == 0.0 && !signbit(simulation.next_ay[i]));
+            assert(simulation.next_az[i] == 0.0 && !signbit(simulation.next_az[i]));
+        }
+        free(simulation.storage);
+    }
+}
+
+static void test_target_accumulation_order(void)
+{
+    const size_t first = 1;
+    const size_t count = first + 3;
+    ReferenceBody bodies[4];
+    fill_reference_bodies(bodies, count);
+    for (size_t i = 0; i < count; ++i) {
+        bodies[i].position = (Vec3){0.0, 0.0, 0.0};
+    }
+    bodies[first].position.x = 1.0;
+    bodies[first].w = 0x1p54;
+    bodies[first + 1].position.x = -1.0;
+    bodies[first + 1].w = 0x1p54;
+    bodies[first + 2].position.x = 1.0;
+    bodies[first + 2].w = 1.0;
+    Simulation simulation = from_bodies(bodies, count);
+    SimulationView state = simulation_view(&simulation);
+    gravity_accelerations(&state, simulation.next_ax, simulation.next_ay, simulation.next_az);
+    /* Target 0 receives (2^54 - 2^54) + 1. Combining the negative and unit
+     * contributions first would lose the unit. */
+    assert(simulation.next_ax[0] == 1.0);
+    assert(simulation.next_ay[0] == 0.0 && simulation.next_az[0] == 0.0);
+    free(simulation.storage);
+}
+
+static void test_source_accumulation_order(void)
+{
+    const size_t source = 4;
+    const size_t count = source + 1;
+    ReferenceBody bodies[5];
+    const Vec3 directions[] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
+    for (size_t axis = 0; axis < 3; ++axis) {
+        for (size_t i = 0; i < count; ++i) {
+            bodies[i] = (ReferenceBody){.w = 1.0};
+        }
+        bodies[0].position = directions[axis];
+        bodies[0].w = 0x1p54;
+        bodies[2].position = (Vec3){-directions[axis].x, -directions[axis].y,
+                                   -directions[axis].z};
+        bodies[2].w = 0x1p54;
+        bodies[3].position = directions[axis];
+        Simulation simulation = from_bodies(bodies, count);
+        SimulationView state = simulation_view(&simulation);
+        gravity_accelerations(&state, simulation.next_ax, simulation.next_ay, simulation.next_az);
+        /* The source must receive (2^54 - 2^54) + 1. Combining the two
+         * contributions from targets 2 and 3 first would lose the unit. */
+        assert(simulation.next_ax[source] == directions[axis].x);
+        assert(simulation.next_ay[source] == directions[axis].y);
+        assert(simulation.next_az[source] == directions[axis].z);
+        free(simulation.storage);
+    }
+}
+
+static void test_acceleration_buffer_swaps(void)
+{
+    const Interaction interactions[] = {gravity, gravity_callback};
+    const size_t steps_per_call[] = {0, 1, 0, 1, 3, 3};
+    for (size_t variant = 0; variant < 2; ++variant) {
+        for (size_t count = 0; count <= 3; ++count) {
+            Simulation simulation = from_bodies(snapshot, count);
+            const Simulation original = simulation; /* Borrow pointers only. */
+            size_t total_steps = 0;
+            for (size_t call = 0; call < sizeof(steps_per_call) / sizeof(steps_per_call[0]); ++call) {
+                simulate(&simulation, 0.001, steps_per_call[call], interactions[variant]);
+                total_steps += steps_per_call[call];
+                bool swapped = count != 0 && total_steps % 2 != 0;
+                assert(simulation.ax == (swapped ? original.next_ax : original.ax));
+                assert(simulation.ay == (swapped ? original.next_ay : original.ay));
+                assert(simulation.az == (swapped ? original.next_az : original.az));
+                assert(simulation.next_ax == (swapped ? original.ax : original.next_ax));
+                assert(simulation.next_ay == (swapped ? original.ay : original.next_ay));
+                assert(simulation.next_az == (swapped ? original.az : original.next_az));
+                assert(simulation.storage == original.storage && simulation.count == count);
+                assert(simulation.w == original.w);
+                assert(simulation.x == original.x && simulation.y == original.y && simulation.z == original.z);
+                assert(simulation.vx == original.vx && simulation.vy == original.vy && simulation.vz == original.vz);
+                SimulationView state = simulation_view(&simulation);
+                assert(state.ax == simulation.ax && state.ay == simulation.ay && state.az == simulation.az);
+            }
+            free(simulation.storage);
+        }
+    }
+}
+
+static void check_reference_simulation(const ReferenceBody *initial, size_t count, size_t steps)
+{
+    const double dt = 0.001;
+    ReferenceBody *reference = malloc((count + 1) * sizeof(*reference));
+    Vec3 *accelerations = malloc((count + 1) * sizeof(*accelerations));
+    assert(reference && accelerations);
+    for (size_t i = 0; i < count; ++i) {
+        reference[i] = initial[i];
+    }
+    Simulation paired = from_bodies(initial, count);
+    Simulation ordered = from_bodies(initial, count);
+    Simulation batched = from_bodies(initial, count);
+    const Simulation original = paired; /* Borrow pointers only. */
+    for (size_t step = 0; step < steps; ++step) {
+        for (size_t i = 0; i < count; ++i) {
+            ReferenceBody *body = &reference[i];
+            body->position.x += body->velocity.x * dt;
+            body->position.y += body->velocity.y * dt;
+            body->position.z += body->velocity.z * dt;
+            body->velocity.x += body->acceleration.x * dt;
+            body->velocity.y += body->acceleration.y * dt;
+            body->velocity.z += body->acceleration.z * dt;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            accelerations[i] = (Vec3){0.0, 0.0, 0.0};
+            for (size_t j = 0; j < count; ++j) {
+                if (i == j) {
+                    continue;
+                }
+                Vec3 contribution = reference_gravity(&reference[i], &reference[j]);
+                accelerations[i].x += contribution.x;
+                accelerations[i].y += contribution.y;
+                accelerations[i].z += contribution.z;
+            }
+        }
+        for (size_t i = 0; i < count; ++i) {
+            reference[i].acceleration = accelerations[i];
+        }
+        simulate(&paired, dt, 1, gravity);
+        simulate(&ordered, dt, 1, gravity_callback);
+        bool swapped = count != 0 && (step + 1) % 2 != 0;
+        assert(paired.ax == (swapped ? original.next_ax : original.ax));
+        assert(paired.ay == (swapped ? original.next_ay : original.ay));
+        assert(paired.az == (swapped ? original.next_az : original.az));
+        for (size_t i = 0; i < count; ++i) {
+            ReferenceBody actual[] = {body_at(&paired, i), body_at(&ordered, i)};
+            for (size_t variant = 0; variant < 2; ++variant) {
+                assert(actual[variant].w == reference[i].w);
+                assert_vec(actual[variant].position, reference[i].position);
+                assert_vec(actual[variant].velocity, reference[i].velocity);
+                assert_vec(actual[variant].acceleration, reference[i].acceleration);
+            }
+        }
+    }
+    simulate(&batched, dt, steps, gravity);
+    for (size_t i = 0; i < count; ++i) {
+        assert_body_equal(body_at(&batched, i), body_at(&paired, i));
+    }
+    free(paired.storage);
+    free(ordered.storage);
+    free(batched.storage);
+    free(reference);
+    free(accelerations);
+}
+
+static void test_reference_simulation(void)
+{
+    const ReferenceBody initial[] = {
+        {1.5, {0.0, 1.0, 2.0}, {0.1, -0.2, 0.3}, {0.2, -0.3, 0.4}},
+        {7.0, {0.0, 1.0, 2.0}, {0.1, -0.2, 0.3}, {0.2, -0.3, 0.4}},
+        {0.5, {-2.0, 3.0, 4.0}, {-0.2, 0.4, 0.1}, {-0.1, 0.2, 0.3}},
+        {3.0, {4.0, -3.0, 1.0}, {0.3, 0.1, -0.2}, {0.3, 0.1, -0.4}},
+        {2.5, {-1.0, -2.0, -3.0}, {-0.1, -0.3, 0.2}, {-0.2, 0.4, 0.1}}
+    };
+    for (size_t count = 1; count <= 5; ++count) {
+        check_reference_simulation(initial, count, 12);
+    }
+}
+
+static void test_reference_simulation_sizes(void)
+{
+    ReferenceBody bodies[MAX_REFERENCE_BODIES];
+    for (size_t case_index = 0; case_index < sizeof(reference_counts) / sizeof(reference_counts[0]); ++case_index) {
+        const size_t count = reference_counts[case_index];
+        fill_reference_bodies(bodies, count);
+        check_reference_simulation(bodies, count, 3);
+        check_reference_simulation(bodies, count, 4);
+    }
+}
+
+static void test_coincident_bodies(void)
+{
+    const size_t count = MAX_REFERENCE_BODIES;
+    const size_t source = count - 1;
+    ReferenceBody bodies[MAX_REFERENCE_BODIES];
+    for (size_t coincident = 0; coincident < 3; ++coincident) {
+        fill_reference_bodies(bodies, count);
+        if (coincident == 2) {
+            bodies[1].position = bodies[0].position;
+            bodies[1].velocity = bodies[0].velocity;
+            bodies[1].acceleration = bodies[0].acceleration;
+        }
+        /* The last body coincides with the first, the second, or both. */
+        const size_t target = coincident == 1 ? 1 : 0;
+        bodies[source].position = bodies[target].position;
+        bodies[source].velocity = bodies[target].velocity;
+        bodies[source].acceleration = bodies[target].acceleration;
+        check_reference_simulation(bodies, count, 3);
+    }
 }
 
 static FILE *text_file(const char *text)
@@ -167,43 +626,77 @@ static FILE *text_file(const char *text)
 
 static void test_file_roundtrip(void)
 {
-    Body original[] = {
+    ReferenceBody original[] = {
         {0.1, {1e-180, -1e180, 3.141592653589793}, {0.0, -0.5, 0.75}, {2.0, 3.0, -4.0}},
         {2.5, {nextafter(1.0, 2.0), 8.0, 9.0}, {10.0, 11.0, 12.0}, {13.0, 14.0, 15.0}}
     };
     FILE *file = tmpfile();
     assert(file);
-    assert(write_bodies(file, original, 2));
+    Simulation simulation = from_bodies(original, 2);
+    assert(write_bodies(file, &simulation));
+    free(simulation.storage);
     rewind(file);
-    Body *loaded;
-    size_t count;
-    assert(read_bodies(file, &loaded, &count));
-    assert(count == 2);
-    assert_body_equal(loaded[0], original[0]);
-    assert_body_equal(loaded[1], original[1]);
-    free(loaded);
+    Simulation loaded;
+    assert(read_bodies(file, &loaded));
+    assert(loaded.count == 2);
+    assert_body_equal(body_at(&loaded, 0), original[0]);
+    assert_body_equal(body_at(&loaded, 1), original[1]);
+    free(loaded.storage);
     assert(fclose(file) == 0);
 
     file = text_file(" \n0\t\n");
-    assert(read_bodies(file, &loaded, &count));
-    assert(count == 0 && loaded == NULL);
+    assert(read_bodies(file, &loaded));
+    assert(loaded.count == 0 && loaded.storage == NULL);
     assert(fclose(file) == 0);
 
     file = text_file("1\n1 2 3 4 5 6 7 8 9 10"); /* No trailing newline. */
-    assert(read_bodies(file, &loaded, &count));
-    assert(count == 1);
-    assert_body_equal(loaded[0], (Body){1.0, {2.0, 3.0, 4.0}, {5.0, 6.0, 7.0}, {8.0, 9.0, 10.0}});
-    free(loaded);
+    assert(read_bodies(file, &loaded));
+    assert(loaded.count == 1);
+    assert_body_equal(body_at(&loaded, 0), (ReferenceBody){1.0, {2.0, 3.0, 4.0}, {5.0, 6.0, 7.0}, {8.0, 9.0, 10.0}});
+    free(loaded.storage);
     assert(fclose(file) == 0);
 
     file = fopen("tests/data/two_body.txt", "r");
     assert(file);
-    assert(read_bodies(file, &loaded, &count));
-    assert(count == 2);
-    assert_vec(loaded[0].acceleration, gravity(&loaded[0], &loaded[1]));
-    assert_vec(loaded[1].acceleration, gravity(&loaded[1], &loaded[0]));
-    free(loaded);
+    assert(read_bodies(file, &loaded));
+    assert(loaded.count == 2);
+    SimulationView state = simulation_view(&loaded);
+    assert_vec(body_at(&loaded, 0).acceleration, gravity(&state, 0, 1));
+    assert_vec(body_at(&loaded, 1).acceleration, gravity(&state, 1, 0));
+    free(loaded.storage);
     assert(fclose(file) == 0);
+}
+
+static void test_simulated_state_roundtrip(void)
+{
+    for (size_t steps = 1; steps <= 4; ++steps) {
+        Simulation simulation = from_bodies(snapshot, 3);
+        simulate(&simulation, 0.001, steps, gravity);
+        for (size_t i = 0; i < simulation.count; ++i) {
+            simulation.next_ax[i] = NAN;
+            simulation.next_ay[i] = NAN;
+            simulation.next_az[i] = NAN;
+        }
+        FILE *file = tmpfile();
+        assert(file);
+        assert(write_bodies(file, &simulation));
+        rewind(file);
+        Simulation loaded;
+        assert(read_bodies(file, &loaded));
+        assert(loaded.count == simulation.count);
+        for (size_t i = 0; i < simulation.count; ++i) {
+            assert_body_equal(body_at(&loaded, i), body_at(&simulation, i));
+        }
+        /* Restarting from saved state must also work with either buffer layout. */
+        simulate(&simulation, 0.001, 1, gravity);
+        simulate(&loaded, 0.001, 1, gravity);
+        for (size_t i = 0; i < simulation.count; ++i) {
+            assert_body_equal(body_at(&loaded, i), body_at(&simulation, i));
+        }
+        free(simulation.storage);
+        free(loaded.storage);
+        assert(fclose(file) == 0);
+    }
 }
 
 static void test_invalid_input(void)
@@ -224,10 +717,9 @@ static void test_invalid_input(void)
     };
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         FILE *file = text_file(invalid[i]);
-        Body *bodies;
-        size_t count;
-        assert(!read_bodies(file, &bodies, &count));
-        assert(bodies == NULL && count == 0);
+        Simulation simulation;
+        assert(!read_bodies(file, &simulation));
+        assert(simulation.storage == NULL && simulation.count == 0);
         assert(fclose(file) == 0);
     }
 
@@ -236,9 +728,9 @@ static void test_invalid_input(void)
     assert(snprintf(maximum, sizeof(maximum), "%zu", SIZE_MAX) > 0);
     assert(parse_size(maximum, &count) && count == SIZE_MAX);
     FILE *file = text_file(maximum); /* Allocation size overflow. */
-    Body *bodies;
-    assert(!read_bodies(file, &bodies, &count));
-    assert(bodies == NULL && count == 0);
+    Simulation simulation;
+    assert(!read_bodies(file, &simulation));
+    assert(simulation.storage == NULL && simulation.count == 0);
     assert(fclose(file) == 0);
 
     file = tmpfile();
@@ -247,18 +739,28 @@ static void test_invalid_input(void)
         assert(fputc('0', file) != EOF);
     }
     rewind(file);
-    assert(!read_bodies(file, &bodies, &count));
+    assert(!read_bodies(file, &simulation));
     assert(fclose(file) == 0);
 }
 
 int main(void)
 {
     test_gravity();
+    test_gravity_accelerations();
+    test_gravity_workspace_initialization();
+    test_target_accumulation_order();
+    test_source_accumulation_order();
     test_euler();
     test_input_acceleration();
     test_callback_snapshot();
-    test_zero_steps_and_arguments();
+    test_callback_multiple_steps();
+    test_construction_and_noops();
+    test_acceleration_buffer_swaps();
+    test_reference_simulation();
+    test_reference_simulation_sizes();
+    test_coincident_bodies();
     test_file_roundtrip();
+    test_simulated_state_roundtrip();
     test_invalid_input();
     puts("All unit tests passed.");
     return 0;

@@ -132,13 +132,16 @@ exact-directory `--output` option.
 
 ### Measurement boundary
 
-The measured region is the entire `simulate(...)` call, including its workspace
-allocation and deallocation. Instance parsing, copying/resetting state, result
-validation, and file writing are outside the region. Every warmup and sample
+The measured region is the entire `simulate(...)` call, which performs no
+allocation or data conversion. State and acceleration workspace are allocated
+before measurement. Instance parsing, copying/resetting state, result validation,
+deallocation, and file writing are outside the region. Every warmup and sample
 starts from the same initial bodies in a warm process. A nonfinite final state
 fails the run. Timing uses `CLOCK_MONOTONIC` wall-clock seconds, retains all raw
 samples, and reports mean, sample variance (`n - 1` denominator, seconds²), and
 standard deviation. Profiling and counters never contribute runtime samples.
+Older revisions allocated workspace inside `simulate`; exclude that allocation
+from the baseline as well when comparing layout changes alone.
 
 Profiler/counter runs each measure one call, with the same reset and warmup
 policy. Linux events start disabled (`--delay=-1`) and the driver uses
@@ -263,10 +266,14 @@ build/plot-venv/bin/python plot_results.py
 ```
 
 This reads every successful `timing/samples.csv` in `results/` and saves
-`plots/raw_time.png` and `plots/speedup.png`. Labels use the suffix after the run
+two images per test instance: `plots/raw_time_<instance>.png` and
+`plots/speedup_<instance>.png`. For example, inputs named `1000` and `100000`
+produce four images, each accumulating all successful runs for that input.
+Labels use the suffix after the run
 type: `c7a9d7e_20261023-160502.425884Z_timing_+Linking` becomes `+Linking`.
-Runs appear in chronological order. Each input gets a separate panel in the
-same two figures; failed timing runs are skipped with a message.
+Runs appear in chronological order. Each input gets its own baseline and axes;
+failed or unfinished timing runs are skipped with a message. Compact figures
+wrap long labels to avoid excessive spacing between results.
 
 Every sample appears as a faint dot with horizontal jitter. Separate markers show
 the arithmetic means, with error bars of ± one sample standard deviation and no
@@ -281,26 +288,79 @@ and `STEPS` across experiments; these parameters are not saved in the timing
 CSVs. The script checks that each input matches the baseline's archived input.
 
 Use `--results-dir PATH` and `--output-dir PATH` to select other directories.
-Re-running replaces the two images; saved benchmark results are unchanged.
+Re-running updates each instance's two images with all available results; saved
+benchmark results are unchanged.
 
 ## Simulation and interaction interface
 
-`src/nbody.h` defines `Vec3`, `Body`, and the callback interface:
+`src/nbody.h` defines `Vec3`, `Simulation`, a read-only `SimulationView`, and the
+callback interface:
 
 ```c
-typedef Vec3 (*Interaction)(const Body *target, const Body *source);
+bool simulation_create(Simulation *simulation, size_t count);
+SimulationView simulation_view(const Simulation *simulation);
+typedef Vec3 (*Interaction)(const SimulationView *state, size_t target, size_t source);
 
-bool simulate(Body *bodies, size_t count, double dt, size_t steps, Interaction f);
+void simulate(Simulation *simulation, double dt, size_t steps, Interaction f);
 ```
 
-`Body` contains `w`, `position`, `velocity`, and `acceleration`. The simulator
-updates the array in place. `f(target, source)` reads two bodies and returns the
-source's contribution to the target's acceleration. It must not mutate state.
-When `f == gravity`, the simulator uses `gravity_accelerations` to evaluate each
-unordered pair once, sharing its displacement and distance between both bodies.
-Pass a different callback to use the generic ordered-pair loop. Gravity
-calculations remain in the gravity module. The file reader enforces positive
-weights because this executable uses masses.
+`Simulation` owns one allocation with thirteen contiguous arrays of `count`
+doubles, initially ordered as `w`, `x`, `y`, `z`, `vx`, `vy`, `vz`, `ax`, `ay`,
+`az`, followed by `next_ax`, `next_ay`, `next_az` workspace. The object stores the
+count, owning `storage` pointer, and active array pointers. Each step swaps the acceleration
+and workspace pointers after evaluating all interactions, eliminating the final
+three array copies. Always access state through its named pointers: the first
+ten slices of `storage` no longer necessarily contain the active state.
+The owning `storage` pointer never changes. Gravity reads mass and position
+directly from their four arrays. There is no packing step or production array of
+body structs; the instance file format is unchanged.
+
+`simulation_create` checks allocation-size overflow and allocation failure once.
+The destination must not already own storage. Initialize all ten state arrays
+before simulation; the workspace is overwritten on every step. The file reader
+allocates this storage and parses directly into the arrays. Free the allocation
+with `free(simulation.storage)`; copying the object does not duplicate ownership.
+An empty simulation has zero count and null pointers.
+
+`simulate` updates arrays in place and trusts its caller: storage must come from
+`simulation_create`, `dt` must be positive and finite, and the callback must be
+nonnull. It performs no argument or bounds checks and cannot fail allocation.
+Zero steps or zero bodies is a no-op. The CLI validates arguments before calling
+it. `SimulationView` exposes the count and ten state arrays through pointers to
+`const double`, excluding workspace and ownership. A view captures pointers, not
+array contents. Reacquire views and cached acceleration pointers after calling
+`simulate`, because their previous arrays may now be workspace. The simulator
+refreshes its callback view each step. `f(state, target, source)`
+returns the source's contribution to the target's acceleration without mutation;
+both indices are below the view's count.
+When `f == gravity`, the simulator uses `gravity_accelerations` to process
+each unordered pair once using scalar loops over `i` and `j > i`. The first
+target's source loop initializes the output arrays with each body's first
+contribution, including zero for coincident pairs. Later targets accumulate
+into those outputs in increasing index order. No separate clearing pass is
+needed, and prior workspace values are never read before initialization.
+
+Each pair shares its displacement and inverse distance cubed between both
+bodies. The current target's coordinates, mass,
+and running acceleration sums stay in local variables throughout the source
+loop. These sums start with contributions already received from lower-index
+bodies. Each pair immediately updates the source's workspace acceleration;
+the target's sums are stored after its source loop. The pair calculations use
+scalar arithmetic, with no explicit SIMD.
+Input state stays read-only throughout the force calculation. The kernel uses
+C `restrict` array pointers to express that its three output arrays do not
+overlap one another or any input array, as guaranteed by `simulation_create`.
+Callers supplying separate output arrays must honor the same contract.
+
+There are `n(n-1)/2` pair calculations and O(n²) work, with constant auxiliary
+storage beyond the existing state and output arrays. Each pair updates both
+bodies, so parallelizing this traversal would require coordinating shared
+output writes.
+
+Pass a different callback to use the generic target-first ordered-pair loop;
+its callback order is unchanged. Gravity calculations remain in the gravity
+module. The file reader enforces positive weights because this executable uses
+masses.
 
 Each step performs these operations in order:
 
@@ -308,9 +368,13 @@ Each step performs these operations in order:
 2. Update all velocities using `velocity += acceleration * dt`.
 3. Accumulate accelerations in separate workspace using the gravity kernel or
    the supplied callback.
-4. Assign the summed accelerations after all pairs have been evaluated.
+4. Swap the current and next acceleration pointers after all pairs have been
+   evaluated, making the summed accelerations active without copying arrays.
 
 Steps 1 and 2 are implemented together per body, before any interaction calls.
+Their private update helper uses `restrict` array parameters to express the
+storage's non-overlap guarantee. Each step passes the current acceleration
+pointers, so the guarantee also holds after buffer swaps.
 This is forward Euler: position uses the old velocity. **Input accelerations
 drive the first step.** If the file supplies zero accelerations, gravity first
 changes velocity on the second step. The example supplies gravity-consistent
@@ -321,9 +385,14 @@ the previous acceleration values consistently for every body.
 Contributions are combined by vector addition in increasing source-index order.
 Mathematically this reduction is associative and commutative; floating-point
 roundoff can make results depend on order.
-The gravity kernel weights the shared vector by each source mass separately.
-Its arithmetic can round differently from two calls to `gravity`; bitwise
-equivalence is not guaranteed.
+The unordered-pair kernel computes
+`inv_r3 = 1 / (r2 * sqrt(r2))`, multiplies it by each mass separately, and updates
+both bodies. Each body receives contributions from lower indices first, then
+higher indices, preserving increasing source-index order. Each contribution
+is added directly to its running sum without intermediate subtotals.
+Pair-sharing arithmetic can round differently from two calls to `gravity`;
+bitwise equivalence across implementations or compiler configurations is not
+guaranteed.
 
 `src/gravity.c` implements Newtonian gravity with normalized units, `G = 1`:
 
@@ -333,7 +402,7 @@ acceleration = source.w * displacement / |displacement|³
 ```
 
 The target mass cancels when converting force to acceleration. Self-interactions
-are skipped by the simulator. Distinct bodies at exactly the same position
+are skipped by both interaction paths. Distinct bodies at exactly the same position
 contribute zero by convention to avoid division by zero; this is not collision
 physics. There is no softening or collision handling.
 
@@ -345,7 +414,8 @@ detect numerical overflow during evolution.
 
 ## Project layout and tests
 
-- `src/nbody.h` and `src/nbody.c`: body types, callback, and serial simulation.
+- `src/nbody.h` and `src/nbody.c`: array types, callback, and serial simulation.
+- `src/state.c`: one-time allocation and read-only array views.
 - `src/gravity.h` and `src/gravity.c`: gravitational interaction only.
 - `src/io.h` and `src/io.c`: text input/output and numeric parsing.
 - `src/main.c`: command-line arguments and selection of the gravity callback.
@@ -355,10 +425,14 @@ detect numerical overflow during evolution.
 - `results/`: ignored, persistent experiment artifacts.
 
 `make test` checks gravity, Euler update order, supplied initial accelerations,
-callback snapshots and pair counts, input validation, round-tripping, and
-resuming saved states. Python tests also cover benchmark boundaries, warmup/state
-resets, statistics, output organization, and tool failures. Actual Linux perf
-integration is opt-in: `NBODY_TEST_PERF=1 make test` on a host with perf access.
+callback snapshots and pair order, comparison with a direct reference solver,
+empty and single-body states, odd and even body counts, coincident bodies,
+accumulation order for both members of a pair, unchanged force inputs,
+acceleration output guards and buffer swaps, construction overflow, input
+validation, round-tripping, and resuming saved states. Python tests also cover
+benchmark boundaries, warmup/state resets, statistics, output organization,
+and tool failures. Actual Linux perf integration is opt-in:
+`NBODY_TEST_PERF=1 make test` on a host with perf access.
 An explicit skip in ordinary tests does not validate Linux event collection.
 That integration test checks profiling and cycles/instructions using temporary
 files under `build/`, which it removes afterward. Use the `bench/run.py` commands

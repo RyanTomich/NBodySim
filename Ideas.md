@@ -1,139 +1,167 @@
-# $N^2$ Optimizations
+## 4. Native array layout (implemented)
 
-These are performance experiments for the direct all-pairs implementation, not
-implemented changes or measured speedups. Start with the cost of each interaction
-before restructuring the whole simulator.
+[`Simulation`](src/nbody.h) now stores mass, position, velocity, acceleration,
+and acceleration workspace in separate contiguous arrays. Gravity reads `w`,
+`x`, `y`, and `z` directly, without stepping over velocity and acceleration
+fields. Input is parsed into this layout; allocation and reset happen outside
+the measured `simulate()` call, and there is no packing step.
 
-## Current implementation
+Layout alone leaves the number of square roots, divisions, and dependent
+accumulations unchanged. A small timing improvement does not establish which
+of those costs dominates. The next opportunity is to use the contiguous arrays
+to reuse data across interactions and calculate several interactions together.
+The following items are proposed experiments, not implemented optimizations.
 
-Each step in [`simulate()`](src/nbody.c) updates all positions and velocities,
-evaluates all `n * (n - 1)` ordered interactions, and then assigns the new
-accelerations. Work is O(n²) per step and memory is O(n). The acceleration
-workspace is allocated once per `simulate()` call, not once per step.
+The current [`gravity_accelerations()`](src/gravity.c) evaluates only `i < j`
+and updates both bodies. Preserve that advantage when testing blocking; compare
+it explicitly against any SIMD design that computes both ordered interactions.
 
-Inspection with Apple Clang 17 on ARM64 using the project's normal compiler
-flags showed:
+**## 5. Block the interaction loop for cache reuse
 
-- An indirect callback call for every interaction.
-- Two actual `hypot` library calls per [`gravity()`](src/gravity.c) evaluation.
-- No loop vectorization of the inner pair loop; compiler diagnostics cite the
-  callback and control flow.
-- Loads and stores of the acceleration accumulator after every interaction.
+Blocking, or tiling, processes a small group of bodies against another group
+before moving on. A source block can remain in cache while several targets use
+it, reducing repeated transfers from larger caches or memory. This is the
+general purpose of [loop blocking](https://www.intel.com/content/www/us/en/developer/articles/technical/loop-optimizations-where-blocks-are-required.html).
 
-These observations identify opportunities; profiling is still needed to establish
-their relative runtime cost.
-
-## 1. Make gravity visible to the optimizer
-
-The callback currently prevents gravity from being inlined into the pair loop.
-Inlining could also let the compiler retain the target's coordinates in registers
-and optimize several interactions together.
-
-First experiment with link-time optimization (`-flto`), which enables optimization
-across source files. Inspect the generated code to verify whether it actually
-removes the indirect call. If insufficient, consider a gravity-specific kernel
-alongside the generic callback implementation. Keep gravity separate from time
-integration and preserve the generic `Interaction` behavior.
-
-Reference: [LLVM link-time optimization](https://llvm.org/docs/LinkTimeOptimization.html).
-
-## 2. Simplify distance arithmetic
-
-For displacement `(dx, dy, dz)`, consider computing:
+For this kernel, divide the body indices into blocks of `B` and visit the upper
+triangle of the block grid:
 
 ```text
-r2 = dx*dx + dy*dy + dz*dz
-scale = source_mass / (r2 * sqrt(r2))
+zero next_ax, next_ay, next_az
+for target block I in increasing order:
+    for source block J from I through the last block:
+        for i in I in increasing order:
+            load i's accumulated acceleration into local sums
+            for j in J in increasing order, with j > i:
+                compute displacement and inv_r3; skip coincident positions
+                add (mass[j] * inv_r3) * displacement to i's local sums
+                subtract (mass[i] * inv_r3) * displacement from j's workspace
+            store i's local sums
 ```
 
-This offers one square root and straightforward arithmetic instead of two nested
-`hypot` calls. It is a high-priority experiment, but not a numerically equivalent
-replacement for every input.
+An off-diagonal tile evaluates all `B * B` pairs between its blocks. A diagonal
+tile evaluates only `i < j`, avoiding self-interactions and duplicate pairs.
+Use smaller ranges at the end when `count` is not divisible by `B`.
 
-Directly squaring components can overflow or underflow, and results will round
-differently. Establish acceptable coordinate ranges and error tolerances, retain
-the zero contribution for coincident positions, and test extreme separations.
-Adding gravitational softening would change the physical model and should be
-considered separately.
+The arrays make both blocks compact: each body needs four input doubles and
+three workspace doubles during this kernel. Two full blocks therefore occupy
+about `112 * B` bytes of relevant data, before cache-line overhead and other
+working data. Try `B = 32, 64, 128, 256` as measurement candidates, not fixed
+defaults. Too-small blocks add loop overhead; too-large blocks lose cache reuse.
+The workspace for `j` still receives an update for each pair, but those updates
+now revisit a small region.
 
-## 3. Accumulate locally and store once per target
+The traversal above can preserve each body's increasing source-index order:
+earlier blocks supply its lower-index contributions first, then its own block,
+then later blocks. Keep the current pair arithmetic and add each contribution
+directly to the running sum. Computing a separate subtotal per tile and adding
+that subtotal later would change floating-point grouping.
+**
+Start with scalar blocking alone to measure its effect. Then use a much smaller
+group of targets inside a tile, retaining several sets of coordinates and
+accumulators in BBregisters. This creates independent calculations for SIMD and
+can reuse a loaded source across those targets. Cache block size and the number
+of targets kept in registers are separate tuning choices.
 
-Use local `ax`, `ay`, and `az` sums throughout the inner loop, then write the
-completed vector to the acceleration workspace. The current assembly accesses
-accumulator memory for every pair; local sums give the compiler a clearer
-opportunity to retain them in registers. Verify the generated code and runtime
-rather than assuming the compiler will eliminate all spills.
+## 6. Use SIMD to compute several interactions at once
 
-This experiment can preserve source visitation and addition order. Keep the
-separate workspace: the [callback tests](tests/test_main.c) require every callback
-to observe a consistent body state, including the previous accelerations, until
-all pairs have been evaluated.
+SIMD instructions apply one operation to several numbers, called lanes. With
+separate arrays, adjacent `x` values can be loaded together, as can `y`, `z`,
+and mass; the kernel need not extract fields from interleaved body structs.
+The choice of what each lane represents determines the accumulation problem.
 
-## 4. Improve data layout, then add blocking and SIMD
+**Keep pair sharing and vectorize across sources.** For one target `i`, lanes
+represent consecutive sources `j`. Broadcast `i`'s coordinates and mass, load
+vectors of source coordinates and masses, and calculate several displacements,
+squared distances, square roots, and scales together. Updates to the distinct
+`next_a[j]` elements can be stored as vectors. Contributions to `i`, however,
+must be combined into one acceleration. A horizontal reduction combines lanes
+and typically changes addition order. An ordered reduction can preserve order
+but may be slower; support depends on target and compiler.
+[LLVM documents these reduction constraints](https://llvm.org/docs/Vectorizers.html#reductions).
 
-Each [`Body`](src/nbody.h) contains ten doubles, while gravity reads only mass and
-position: four doubles. Separate arrays for `x`, `y`, `z`, and mass would provide
-compact, contiguous inputs for a gravity-specific kernel. The public instance
-format can remain unchanged. Include any packing or conversion cost in timing.
-
-Next, process small blocks of targets against blocks of sources, reusing source
-data across several targets. This can improve cache reuse and expose independent
-calculations for SIMD. Tune block sizes through measurement.
-
-Vectorizing across sources often changes floating-point reduction order.
-Vectorizing across independent targets can retain each target's source order.
-Keep fast-math disabled for the baseline comparison and explicitly evaluate any
-proposal to relax floating-point behavior.
-
-Use compiler vectorization reports to verify what happens instead of assuming
-`-O3` vectorizes the loop. Useful Clang diagnostics are
-`-Rpass=loop-vectorize`, `-Rpass-missed=loop-vectorize`, and
-`-Rpass-analysis=loop-vectorize`.
-
-Reference: [LLVM vectorization documentation](https://llvm.org/docs/Vectorizers.html).
-
-## 5. Evaluate each unordered pair once
-
-For gravity, the displacement and distance for `(i, j)` can serve both bodies.
-For each pair with `i < j`, the mathematical updates are:
+**Alternatively, vectorize across independent targets.** Give each lane its own
+target and three acceleration sums. Load target coordinates once and broadcast
+one source at a time:
 
 ```text
-q = (position[j] - position[i]) / distance(i, j)^3
-acceleration[i] += mass[j] * q
-acceleration[j] -= mass[i] * q
+lanes = consecutive targets i, i+1, ...
+ax, ay, az = zero vectors
+for source j = 0 through count-1:
+    broadcast w[j], x[j], y[j], z[j]
+    calculate one contribution per target lane
+    add each contribution to that lane's own sums
+store the completed target accelerations
 ```
 
-This halves the number of distance calculations, but does not guarantee a 2x
-speedup. Updating two accumulators complicates memory access, vectorization, and
-threading; compare it against an optimized ordered-pair kernel.
+Here the lanes never need to be reduced together, so each target can retain its
+original source order. This is an ordered-pair gravity kernel: it computes both
+`(i, j)` and `(j, i)`, roughly doubling the distance calculations relative to the
+current kernel. It could still win through better SIMD throughput and less
+workspace traffic, but that must be measured. Keeping pair sharing in this
+version introduces a reduction for the shared source's acceleration instead;
+the two-sided update does not become independent just by changing lane direction.
 
-Accelerations are not equal and opposite when masses differ. This optimization
-applies to gravity, not arbitrary `Interaction` callbacks. Check rounding changes
-and accumulate into separate workspace before assigning body accelerations.
+Handle self-pairs and coincident positions with masks. For inactive lanes, use
+a safe denominator before division and select a zero contribution afterward;
+computing infinity and multiplying by zero can produce NaN. Handle the final
+partial vector with a scalar tail or safe masked loads, never an out-of-range
+read. Keep the existing unsoftened gravity law.
 
-## Measurement and correctness
+Keep fast-math disabled initially. Matching source order alone does not ensure
+bitwise equality: fused multiply-add, reciprocal approximations, and changed
+pair arithmetic can also alter rounding. Keep contraction settings consistent
+between variants; assess approximate reciprocal square roots as a separate
+numerical tradeoff. [Clang's floating-point options](https://clang.llvm.org/docs/UsersManual.html#controlling-floating-point-behavior)
+describe these controls.
 
-- Measure one change at a time with `bench/run.py`, using several body counts and
-  the same saved inputs. Use repeated samples and inspect each mode's
-  `status.json` and error logs.
-- Track runtime and runtime divided by `n * (n - 1) * steps` for `n > 1`. For the
-  symmetric variant, retain that denominator for comparison and separately
-  distinguish its actual unordered-pair count.
-- Include all work inside `simulate()`, including allocation, packing, and
-  conversion. The existing benchmark excludes input loading, state reset, and
-  final output from its measured interval.
-- Timing works on macOS; the repository's profiling and hardware-counter modes
-  require Linux with usable perf access. Use profiles and counters to determine
-  whether math, instruction overhead, or memory traffic dominates.
-- Compare numerical results against the baseline on small cases and run
-  `make test` after implementation changes. Exercise unequal masses, coincident
-  positions, extreme separations, custom callbacks, and multiple steps.
-- Preserve forward Euler ordering: input accelerations drive the first step,
-  positions use the previous velocities, and new accelerations are assigned only
-  after all pair evaluations. Compute final accelerations because they are part
-  of the saved state.
+First try compiler vectorization on a small, directly expressed gravity loop;
+use architecture-specific intrinsics only if diagnostics and measurements
+justify them. Inspect the force loop itself, not just initialization loops.
+Use `-Rpass=loop-vectorize`, `-Rpass-missed=loop-vectorize`, and
+`-Rpass-analysis=loop-vectorize`, then inspect generated instructions and time
+the result. A successful vectorization remark does not prove a speedup.
+[LLVM vectorization diagnostics](https://llvm.org/docs/Vectorizers.html#diagnostics).
 
-Allocation reuse, the self-interaction branch, and the final O(n) acceleration
-copy are lower priorities for large n. Begin with compiler visibility, local
-accumulation, and distance arithmetic, then measure whether layout changes,
-blocking, pair symmetry, or parallel execution provide further gains.
+## Other opportunities enabled by the layout
+
+- **Expose non-overlap to the compiler.** Construction already guarantees that
+  state and workspace slices do not overlap. Express the relevant contracts
+  with C `restrict` on the actual array pointers used by the gravity kernel,
+  especially its writable outputs. This may eliminate alias checks and allow
+  better load scheduling. `const` alone does not promise non-overlap, and
+  restricting a pointer to the container does not establish independence of
+  every array it contains. These must be true contracts, not new runtime checks.
+  See [restricted pointers](https://gcc.gnu.org/onlinedocs/gcc/Restricted-Pointers.html).
+- **Vectorize the Euler update.** Contiguous position, velocity, and acceleration
+  arrays also allow several bodies to be advanced together. Preserve old velocity
+  for the position update and old acceleration for the velocity update. This
+  removes no O(n²) work, so expect it to matter mainly for smaller instances.
+- **Swap acceleration buffers instead of copying.** Swap the three current and
+  next pointers after all interactions, saving the final O(n) copy. This needs
+  changes to the current fixed-offset assumptions: refresh the callback view
+  after swaps and make benchmark reset/validation follow the active state arrays
+  instead of assuming state is always the first ten slices. Free the original
+  `storage` allocation as before. Treat this as lower priority than the pair loop.
+- **Parallelize independent target blocks later.** An ordered-pair kernel can
+  assign disjoint output ranges to workers while sharing read-only source arrays.
+  The current pair-sharing kernel writes both ends of each pair, so simply
+  parallelizing its outer loop would race. It needs conflict-free tile scheduling
+  or per-worker acceleration buffers and a later reduction, with added memory,
+  synchronization, and possible rounding changes. Complete all interactions
+  before publishing accelerations or starting the next Euler step.
+
+## How to compare the experiments
+
+Measure scalar blocking first, then each SIMD strategy, using the same saved
+inputs and compiler/LTO settings. Try sizes both within and beyond cache capacity,
+including counts that are not multiples of a tile or vector width. Keep setup
+and reset outside timing; include all per-step work inside `simulate()`. Use
+`bench/run.py` with repeated samples, and inspect each run's status and error
+logs. Linux cache counters can help test the cache-reuse hypothesis where available.
+
+Check results against the direct reference and run `make test` after code changes.
+Exercise unequal masses, coincident positions, extreme separations, zero and one
+body, multiple steps, and saved-state resumption. Preserve custom callback
+behavior and Euler ordering. Compare runtime for the same simulation work;
+report separately whether the kernel evaluates ordered or unordered pairs.

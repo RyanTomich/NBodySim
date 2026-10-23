@@ -26,10 +26,11 @@ class BenchTests(unittest.TestCase):
         self.instance = self.directory / "one.txt"
         self.instance.write_text("1\n1 0 0 0 0 0 0 0 0 0\n")
 
-    def driver(self, *, fake=False, mode="timing", samples=3, warmups=2, instance=None, env=None):
+    def driver(self, *, fake=False, mode="timing", samples=3, warmups=2, steps=3,
+               instance=None, env=None):
         return subprocess.run(
             [str(ROOT / "build" / ("bench-test" if fake else "bench")),
-             str(instance or self.instance), "0.01", "3", str(samples), str(warmups), mode,
+             str(instance or self.instance), "0.01", str(steps), str(samples), str(warmups), mode,
              str(self.directory / "final.txt")],
             capture_output=True, text=True, env=env)
 
@@ -48,13 +49,17 @@ class BenchTests(unittest.TestCase):
                 benchmark.timing_summary(bad)
 
     def test_warmup_reset_and_timing_sample_count(self):
-        result = self.driver(fake=True)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stderr.splitlines(), ["simulate:ungated"] * 5)
-        rows = list(csv.DictReader(result.stdout.splitlines()))
-        self.assertEqual(len(rows), 3)  # Two warmups are excluded.
-        self.assertTrue(all(float(row["seconds"]) >= 0 for row in rows))
-        self.assertEqual((self.directory / "final.txt").read_text(), "1\n1 1 0 0 2 0 0 3 0 0\n")
+        for steps in (1, 2, 3, 4):
+            for warmups in (0, 1, 2):
+                with self.subTest(steps=steps, warmups=warmups):
+                    result = self.driver(fake=True, steps=steps, warmups=warmups)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stderr.splitlines(), ["simulate:ungated"] * (warmups + 3))
+                    rows = list(csv.DictReader(result.stdout.splitlines()))
+                    self.assertEqual(len(rows), 3)  # Warmups are excluded.
+                    self.assertTrue(all(float(row["seconds"]) >= 0 for row in rows))
+                    self.assertEqual((self.directory / "final.txt").read_text(),
+                                     "1\n1 2 3 4 5 6 7 8 9 10\n")
 
     def test_perf_gate_surrounds_only_measured_call(self):
         result = self.driver(fake=True, mode="perf", samples=1)
@@ -63,20 +68,41 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(result.stderr.splitlines(),
                          ["simulate:ungated", "simulate:ungated", "enable", "simulate:measured", "disable"])
 
-    def test_failed_simulation_still_disables_perf(self):
-        result = self.driver(fake=True, mode="perf", samples=1, warmups=0,
-                             env={**os.environ, "BENCH_TEST_FAIL": "1"})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stderr.splitlines()[:3], ["enable", "simulate:measured", "disable"])
-        self.assertFalse((self.directory / "final.txt").exists())
+    def test_nonfinite_simulation_still_disables_perf(self):
+        for steps in (1, 2):
+            for axis in ("1", "2", "3"):
+                with self.subTest(steps=steps, axis=axis):
+                    result = self.driver(fake=True, mode="perf", samples=1, warmups=0, steps=steps,
+                                         env={**os.environ, "BENCH_TEST_FAIL": axis})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr.splitlines()[:3],
+                                     ["enable", "simulate:measured", "disable"])
+                    self.assertIn("Sample 1 produced a nonfinite state.", result.stderr)
+                    self.assertFalse((self.directory / "final.txt").exists())
+
+    def test_nonfinite_warmup_is_rejected(self):
+        for steps in (1, 2):
+            for axis in ("1", "2", "3"):
+                with self.subTest(steps=steps, axis=axis):
+                    result = self.driver(fake=True, steps=steps,
+                                         env={**os.environ, "BENCH_TEST_FAIL": axis})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("Warmup produced a nonfinite state.", result.stderr)
+                    self.assertFalse((self.directory / "final.txt").exists())
 
     def test_matches_application(self):
-        instance = ROOT / "tests" / "data" / "two_body.txt"
-        normal = subprocess.run([str(ROOT / "build" / "app"), str(instance), "0.01", "3"],
-                                capture_output=True, text=True, check=True)
-        measured = self.driver(instance=instance)
-        self.assertEqual(measured.returncode, 0, measured.stderr)
-        self.assertEqual((self.directory / "final.txt").read_text(), normal.stdout)
+        empty = self.directory / "empty.txt"
+        empty.write_text("0\n")
+        for instance in (empty, self.instance, ROOT / "tests" / "data" / "two_body.txt"):
+            for steps in (1, 2, 3, 4):
+                with self.subTest(instance=instance.name, steps=steps):
+                    normal = subprocess.run(
+                        [str(ROOT / "build" / "app"), str(instance), "0.01", str(steps)],
+                        capture_output=True, text=True, check=True)
+                    measured = self.driver(instance=instance, steps=steps)
+                    self.assertEqual(measured.returncode, 0, measured.stderr)
+                    self.assertEqual((self.directory / "final.txt").read_text(), normal.stdout)
 
     def test_nonfinite_state_fails_without_summary(self):
         self.instance.write_text("1\n1 1e308 0 0 1e308 0 0 0 0 0\n")

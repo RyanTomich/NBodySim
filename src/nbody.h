@@ -9,19 +9,45 @@ typedef struct {
 } Vec3;
 
 typedef struct {
-    double w;
-    Vec3 position;
-    Vec3 velocity;
-    Vec3 acceleration;
-} Body;
+    size_t count;
+    double *storage;
+    double *w, *x, *y, *z;
+    double *vx, *vy, *vz;
+    double *ax, *ay, *az;
+    double *next_ax, *next_ay, *next_az;
+} Simulation;
+
+/* Read-only state, excluding ownership and acceleration workspace.
+ * Reacquire after simulate: acceleration pointers can change roles.
+ */
+typedef struct {
+    size_t count;
+    const double *w, *x, *y, *z;
+    const double *vx, *vy, *vz;
+    const double *ax, *ay, *az;
+} SimulationView;
+
+/* Allocate thirteen contiguous count-element arrays initially in declaration order.
+ * Initialize the ten state arrays before simulation; workspace is overwritten.
+ * The destination must not own an allocation. Failure leaves it empty.
+ * Zero count succeeds with null pointers. Release with free(simulation.storage).
+ * Copies of Simulation share storage; they do not transfer or duplicate ownership.
+ */
+bool simulation_create(Simulation *simulation, size_t count);
+/* Capture the current named state pointers, not a copy of the array contents. */
+SimulationView simulation_view(const Simulation *simulation);
 
 /* Return the source's acceleration contribution to the target, without mutation. */
-typedef Vec3 (*Interaction)(const Body *target, const Body *source);
+typedef Vec3 (*Interaction)(const SimulationView *state, size_t target, size_t source);
 
 /* Update in place using forward Euler, then recompute acceleration with f.
- * Input accelerations drive the first step. False means invalid arguments or
- * allocation failure; in either case the bodies are unchanged.
+ * Input accelerations drive the first step. No allocation or argument validation.
+ * Each step swaps ax/ay/az with next_ax/next_ay/next_az after all interactions.
+ * Read state through the named pointers; reacquire cached views and acceleration
+ * pointers after this call. The owning storage pointer never changes.
+ * Requires storage from simulation_create, initialized state, positive finite dt,
+ * and a nonnull callback. Zero count or zero steps is a no-op.
  */
-bool simulate(Body *bodies, size_t count, double dt, size_t steps, Interaction f);
+void simulate(Simulation *simulation, double dt, size_t steps, Interaction f);
 
 #endif

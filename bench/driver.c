@@ -11,24 +11,41 @@
 #include <string.h>
 #include <time.h>
 
-static bool finite_state(const Body *bodies, size_t count)
+static bool finite_state(const Simulation *simulation)
 {
-    for (size_t i = 0; i < count; ++i) {
-        const Body *b = &bodies[i];
-        if (!isfinite(b->w)
-            || !isfinite(b->position.x) || !isfinite(b->position.y) || !isfinite(b->position.z)
-            || !isfinite(b->velocity.x) || !isfinite(b->velocity.y) || !isfinite(b->velocity.z)
-            || !isfinite(b->acceleration.x) || !isfinite(b->acceleration.y) || !isfinite(b->acceleration.z)) {
-            return false;
+    /* Acceleration arrays can move; inactive workspace is not saved state. */
+    const double *fields[] = {
+        simulation->w, simulation->x, simulation->y, simulation->z,
+        simulation->vx, simulation->vy, simulation->vz,
+        simulation->ax, simulation->ay, simulation->az
+    };
+    for (size_t field = 0; field < sizeof(fields) / sizeof(fields[0]); ++field) {
+        for (size_t i = 0; i < simulation->count; ++i) {
+            if (!isfinite(fields[field][i])) {
+                return false;
+            }
         }
     }
     return true;
 }
 
-static void reset_state(Body *bodies, const Body *initial, size_t count)
+static void reset_state(Simulation *simulation, const Simulation *initial)
 {
-    if (count != 0) {
-        memcpy(bodies, initial, count * sizeof(*bodies));
+    if (initial->count == 0) {
+        return;
+    }
+    double *destination[] = {
+        simulation->w, simulation->x, simulation->y, simulation->z,
+        simulation->vx, simulation->vy, simulation->vz,
+        simulation->ax, simulation->ay, simulation->az
+    };
+    const double *source[] = {
+        initial->w, initial->x, initial->y, initial->z,
+        initial->vx, initial->vy, initial->vz,
+        initial->ax, initial->ay, initial->az
+    };
+    for (size_t field = 0; field < sizeof(destination) / sizeof(destination[0]); ++field) {
+        memcpy(destination[field], source[field], initial->count * sizeof(double));
     }
 }
 
@@ -58,34 +75,35 @@ int main(int argc, char **argv)
         perror("input");
         return EXIT_FAILURE;
     }
-    Body *initial;
-    size_t count;
-    bool loaded = read_bodies(input, &initial, &count);
+    Simulation initial;
+    bool loaded = read_bodies(input, &initial);
     int closed = fclose(input);
     if (!loaded || closed != 0) {
         fprintf(stderr, "Could not read instance.\n");
-        free(initial);
+        free(initial.storage);
         return EXIT_FAILURE;
     }
 
     int result = EXIT_FAILURE;
-    Body *bodies = count == 0 ? NULL : malloc(count * sizeof(*bodies));
+    Simulation simulation;
+    bool allocated = simulation_create(&simulation, initial.count);
     double *durations = malloc(samples * sizeof(*durations));
-    if ((count != 0 && !bodies) || !durations) {
+    if (!allocated || !durations) {
         fprintf(stderr, "Could not allocate benchmark state.\n");
         goto cleanup;
     }
 
     for (size_t i = 0; i < warmups; ++i) {
-        reset_state(bodies, initial, count);
-        if (!simulate(bodies, count, dt, steps, gravity) || !finite_state(bodies, count)) {
-            fprintf(stderr, "Warmup failed or produced a nonfinite state.\n");
+        reset_state(&simulation, &initial);
+        simulate(&simulation, dt, steps, gravity);
+        if (!finite_state(&simulation)) {
+            fprintf(stderr, "Warmup produced a nonfinite state.\n");
             goto cleanup;
         }
     }
 
     for (size_t i = 0; i < samples; ++i) {
-        reset_state(bodies, initial, count);
+        reset_state(&simulation, &initial);
         struct timespec start, end;
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
@@ -97,7 +115,7 @@ int main(int argc, char **argv)
             goto cleanup;
         }
 
-        bool completed = simulate(bodies, count, dt, steps, gravity);
+        simulate(&simulation, dt, steps, gravity);
 
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
@@ -110,8 +128,8 @@ int main(int argc, char **argv)
             perror("disable perf events");
             goto cleanup;
         }
-        if (!completed || !finite_state(bodies, count)) {
-            fprintf(stderr, "Sample %zu failed or produced a nonfinite state.\n", i + 1);
+        if (!finite_state(&simulation)) {
+            fprintf(stderr, "Sample %zu produced a nonfinite state.\n", i + 1);
             goto cleanup;
         }
     }
@@ -121,7 +139,7 @@ int main(int argc, char **argv)
         perror("final state");
         goto cleanup;
     }
-    bool written = write_bodies(output, bodies, count);
+    bool written = write_bodies(output, &simulation);
     closed = fclose(output);
     if (!written || closed != 0) {
         fprintf(stderr, "Could not write final state.\n");
@@ -141,7 +159,7 @@ int main(int argc, char **argv)
 
 cleanup:
     free(durations);
-    free(bodies);
-    free(initial);
+    free(simulation.storage);
+    free(initial.storage);
     return result;
 }

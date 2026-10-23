@@ -32,8 +32,8 @@ build/bench: $(BENCH_SOURCES) $(HEADERS) Makefile | build
 build/tests: $(TEST_SOURCES) $(HEADERS) Makefile | build
 	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc $(TEST_SOURCES) $(LDLIBS) -o $@
 
-build/bench-test: bench/driver.c tests/bench/fake_simulation.c src/io.c src/gravity.c $(HEADERS) Makefile | build
-	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc -Ibench bench/driver.c tests/bench/fake_simulation.c src/io.c src/gravity.c $(LDLIBS) -o $@
+build/bench-test: bench/driver.c tests/bench/fake_simulation.c src/io.c src/gravity.c src/state.c $(HEADERS) Makefile | build
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc -Ibench bench/driver.c tests/bench/fake_simulation.c src/io.c src/gravity.c src/state.c $(LDLIBS) -o $@
 
 build:
 	mkdir -p $@

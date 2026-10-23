@@ -23,23 +23,18 @@ int main(int argc, char **argv)
         perror(argv[1]);
         return EXIT_FAILURE;
     }
-    Body *bodies;
-    size_t count;
-    bool loaded = read_bodies(input, &bodies, &count);
+    Simulation simulation;
+    bool loaded = read_bodies(input, &simulation);
     int closed = fclose(input);
     if (!loaded || closed != 0) {
         fprintf(stderr, "Could not read instance: invalid data, I/O error, or allocation failure.\n");
-        free(bodies);
+        free(simulation.storage);
         return EXIT_FAILURE;
     }
 
-    if (!simulate(bodies, count, dt, steps, gravity)) {
-        fprintf(stderr, "Could not allocate simulation workspace.\n");
-        free(bodies);
-        return EXIT_FAILURE;
-    }
-    bool written = write_bodies(stdout, bodies, count);
-    free(bodies);
+    simulate(&simulation, dt, steps, gravity);
+    bool written = write_bodies(stdout, &simulation);
+    free(simulation.storage);
     if (!written || fflush(stdout) != 0) {
         fprintf(stderr, "Could not write final state.\n");
         return EXIT_FAILURE;

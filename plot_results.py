@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot every successful timing sample, with means and sample standard deviations."""
+"""Plot runtime and speedup for each input, with all samples, means, and sample SDs."""
 
 import argparse
 import csv
@@ -13,6 +13,7 @@ import re
 import statistics
 import sys
 import tempfile
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +42,9 @@ def load_results(results_dir):
     """Keep runs separate and read raw samples, never averages of summaries."""
     groups = {}
     for directory in sorted(results_dir.glob("*/*/timing")):
+        if not (directory / "status.json").exists():
+            print("Skipping {}: no timing status yet".format(directory), file=sys.stderr)
+            continue
         try:
             status = json.loads((directory / "status.json").read_text())
             if status.get("status") != "ok":
@@ -93,54 +97,49 @@ def speedup_samples(runs, baseline):
     return [[reference / sample for sample in run.samples] for run in runs]
 
 
-def draw_figure(plt, groups, values, baselines, output, speedup=False):
-    columns = min(2, len(groups))
-    rows = math.ceil(len(groups) / columns)
-    longest = max(len(run.label) for runs in groups.values() for run in runs)
-    widest = max(len(runs) for runs in groups.values())
-    panel_width = max(7.2, widest * max(1.25, longest * 0.082))
-    fig, axes = plt.subplots(rows, columns, squeeze=False,
-                             figsize=(panel_width * columns, 4.6 * rows))
+def draw_figure(plt, runs, observations, baseline, output, speedup=False):
+    # Keep each result about an inch apart; long labels should not widen every gap.
+    width = max(5.2, 1.2 + len(runs))
+    labels = ["\n".join(textwrap.fill(part, width=14, break_on_hyphens=False)
+                        for part in run.label.split("_")) for run in runs]
+    fig, ax = plt.subplots(figsize=(width, 4.6))
     color = "#3978a8"
     randomizer = random.Random(0)
 
-    for ax, (instance, runs), observations, baseline in zip(
-            axes.flat, groups.items(), values, baselines):
-        means = [statistics.mean(samples) for samples in observations]
-        deviations = [statistics.stdev(samples) for samples in observations]
-        for position, samples in enumerate(observations):
-            # Spread every sample horizontally so even identical values remain visible.
-            offsets = [0.36 * (i / (len(samples) - 1) - 0.5) for i in range(len(samples))]
-            randomizer.shuffle(offsets)
-            ax.scatter([position + offset for offset in offsets], samples,
-                       s=24, color=color, alpha=0.22, edgecolors="none", zorder=2)
-        ax.errorbar(range(len(runs)), means, yerr=deviations, fmt="o", linestyle="none",
-                    color=color, markersize=4.5,
-                    elinewidth=1.3, capsize=4, capthick=1.3, zorder=3)
-        if speedup:
-            ax.axhline(1, color="#999999", linewidth=0.8, linestyle="--", zorder=1)
-        ax.set_xticks(range(len(runs)))
-        ax.set_xticklabels([run.label for run in runs], fontsize=10)
-        ax.set_ylabel("Speedup (×)" if speedup else "Time (s)")
-        title = "Speedup vs {}".format(baseline.label) if speedup else "Runtime"
-        ax.set_title("{} · Input {}".format(title, instance), loc="left", pad=16)
-        ax.set_xlim(-0.5, len(runs) - 0.5)
-        ax.margins(y=0.12)
-        ax.set_ylim(bottom=0)
-        ax.set_axisbelow(True)
-        ax.grid(axis="y", color="#e9e9e9", linewidth=0.7)
-        ax.tick_params(axis="both", length=0, pad=8)
-        for spine in ("top", "right", "left"):
-            ax.spines[spine].set_visible(False)
-        ax.spines["bottom"].set_color("#cccccc")
+    means = [statistics.mean(samples) for samples in observations]
+    deviations = [statistics.stdev(samples) for samples in observations]
+    for position, samples in enumerate(observations):
+        # Spread every sample horizontally so even identical values remain visible.
+        offsets = [0.36 * (i / (len(samples) - 1) - 0.5) for i in range(len(samples))]
+        randomizer.shuffle(offsets)
+        ax.scatter([position + offset for offset in offsets], samples,
+                   s=24, color=color, alpha=0.22, edgecolors="none", zorder=2)
+    ax.errorbar(range(len(runs)), means, yerr=deviations, fmt="o", linestyle="none",
+                color=color, markersize=4.5,
+                elinewidth=1.3, capsize=4, capthick=1.3, zorder=3)
+    if speedup:
+        ax.axhline(1, color="#999999", linewidth=0.8, linestyle="--", zorder=1)
+    ax.set_xticks(range(len(runs)))
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_ylabel("Speedup (×)" if speedup else "Time (s)")
+    title = "Speedup vs {}".format(baseline.label) if speedup else "Runtime"
+    title = textwrap.fill(title, width=int(width * 10))
+    ax.set_title("{}\nInput {}".format(title, runs[0].instance), loc="left", pad=12)
+    ax.set_xlim(-0.5, len(runs) - 0.5)
+    ax.margins(y=0.12)
+    ax.set_ylim(bottom=0)
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", color="#e9e9e9", linewidth=0.7)
+    ax.tick_params(axis="both", length=0, pad=8)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color("#cccccc")
 
-    for ax in list(axes.flat)[len(groups):]:
-        ax.set_visible(False)
-    note = "Faint dots: all samples   •   Mean markers + error bars: mean ± 1 sample SD"
+    note = "Faint dots: all samples\nMarkers + error bars: mean ± 1 sample SD"
     if speedup:
         note += "\nEach sample = baseline mean time / measured time"
     fig.text(0.5, 0.025, note, ha="center", va="bottom", fontsize=9, color="#666666")
-    fig.tight_layout(rect=(0, 0.11 if speedup else 0.08, 1, 1), pad=1.5)
+    fig.tight_layout(rect=(0, 0.14 if speedup else 0.11, 1, 1), pad=1.2)
     fig.savefig(output, dpi=220, facecolor="white")
     plt.close(fig)
 
@@ -159,11 +158,13 @@ def main(argv=None):
         baselines = [choose_baseline(runs, args.baseline) for runs in groups.values()]
         speedups = [speedup_samples(runs, baseline)
                     for runs, baseline in zip(groups.values(), baselines)]
-        raw_times = [[run.samples for run in runs] for runs in groups.values()]
-        figures = (
-            ("raw_time.png", raw_times, False),
-            ("speedup.png", speedups, True),
-        )
+        figures = []
+        for (instance, runs), baseline, ratios in zip(groups.items(), baselines, speedups):
+            for kind, values, speedup in (
+                    ("raw_time", [run.samples for run in runs], False),
+                    ("speedup", ratios, True)):
+                output = args.output_dir / "{}_{}.png".format(kind, instance)
+                figures.append((runs, values, baseline, output, speedup))
         args.output_dir.mkdir(parents=True, exist_ok=True)
         # Avoid requiring a writable home directory or a graphical desktop.
         with tempfile.TemporaryDirectory(prefix="nbody-matplotlib-") as config_dir:
@@ -179,14 +180,14 @@ def main(argv=None):
 
             with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 11,
                                  "axes.titlesize": 13}):
-                for filename, values, speedup in figures:
-                    draw_figure(plt, groups, values, baselines, args.output_dir / filename,
+                for runs, values, baseline, output, speedup in figures:
+                    draw_figure(plt, runs, values, baseline, output,
                                 speedup=speedup)
         for (instance, runs), baseline in zip(groups.items(), baselines):
             print("Input {}: {} runs, {} samples; baseline {}".format(
                 instance, len(runs), sum(len(run.samples) for run in runs), baseline.label))
-        for filename, _, _ in figures:
-            print("Saved {}".format(args.output_dir / filename))
+        for _, _, _, output, _ in figures:
+            print("Saved {}".format(output))
     except (OSError, ValueError) as error:
         parser.exit(1, "error: {}\n".format(error))
     return 0

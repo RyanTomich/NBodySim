@@ -1,39 +1,39 @@
 #include "nbody.h"
 #include "gravity.h"
 
-#include <math.h>
-#include <stdint.h>
-#include <stdlib.h>
-
-bool simulate(Body *bodies, size_t count, double dt, size_t steps, Interaction f)
+/* All arrays are disjoint slices of storage. Rebind them on each step because
+ * acceleration arrays change roles after the interactions finish. */
+static void advance_state(size_t count, double dt,
+                          double *restrict x, double *restrict y, double *restrict z,
+                          double *restrict vx, double *restrict vy, double *restrict vz,
+                          const double *restrict ax, const double *restrict ay,
+                          const double *restrict az)
 {
-    if ((!bodies && count != 0) || !f || !isfinite(dt) || dt <= 0.0) {
-        return false;
+    for (size_t i = 0; i < count; ++i) {
+        x[i] += vx[i] * dt;
+        y[i] += vy[i] * dt;
+        z[i] += vz[i] * dt;
+        vx[i] += ax[i] * dt;
+        vy[i] += ay[i] * dt;
+        vz[i] += az[i] * dt;
     }
+}
+
+void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
+{
+    const size_t count = simulation->count;
     if (steps == 0 || count == 0) {
-        return true;
+        return;
     }
-    if (count > SIZE_MAX / sizeof(Vec3)) {
-        return false;
-    }
-    Vec3 *accelerations = malloc(count * sizeof(*accelerations));
-    if (!accelerations) {
-        return false;
-    }
-
     for (size_t step = 0; step < steps; ++step) {
-        for (size_t i = 0; i < count; ++i) {
-            Body *body = &bodies[i];
-            body->position.x += body->velocity.x * dt;
-            body->position.y += body->velocity.y * dt;
-            body->position.z += body->velocity.z * dt;
-            body->velocity.x += body->acceleration.x * dt;
-            body->velocity.y += body->acceleration.y * dt;
-            body->velocity.z += body->acceleration.z * dt;
-        }
+        advance_state(count, dt, simulation->x, simulation->y, simulation->z,
+                      simulation->vx, simulation->vy, simulation->vz,
+                      simulation->ax, simulation->ay, simulation->az);
 
+        const SimulationView state = simulation_view(simulation);
         if (f == gravity) {
-            gravity_accelerations(bodies, count, accelerations);
+            gravity_accelerations(&state, simulation->next_ax,
+                                  simulation->next_ay, simulation->next_az);
         } else {
             for (size_t i = 0; i < count; ++i) {
                 double ax = 0.0;
@@ -43,20 +43,26 @@ bool simulate(Body *bodies, size_t count, double dt, size_t steps, Interaction f
                     if (i == j) {
                         continue;
                     }
-                    Vec3 contribution = f(&bodies[i], &bodies[j]);
+                    Vec3 contribution = f(&state, i, j);
                     ax += contribution.x;
                     ay += contribution.y;
                     az += contribution.z;
                 }
-                accelerations[i] = (Vec3){ax, ay, az};
+                simulation->next_ax[i] = ax;
+                simulation->next_ay[i] = ay;
+                simulation->next_az[i] = az;
             }
         }
 
-        for (size_t i = 0; i < count; ++i) {
-            bodies[i].acceleration = accelerations[i];
-        }
+        /* Publish new accelerations only after every interaction has read state. */
+        double *previous_ax = simulation->ax;
+        double *previous_ay = simulation->ay;
+        double *previous_az = simulation->az;
+        simulation->ax = simulation->next_ax;
+        simulation->ay = simulation->next_ay;
+        simulation->az = simulation->next_az;
+        simulation->next_ax = previous_ax;
+        simulation->next_ay = previous_ay;
+        simulation->next_az = previous_az;
     }
-
-    free(accelerations);
-    return true;
 }

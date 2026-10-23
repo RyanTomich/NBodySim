@@ -6,6 +6,7 @@ from pathlib import Path
 import statistics
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,6 +66,60 @@ class PlotResultsTests(unittest.TestCase):
         self.assertEqual(list(groups), ["1000", "two_body"])
         self.assertEqual([len(runs) for runs in groups.values()], [1, 1])
         self.assertIn("+Failed", errors.getvalue())
+
+    def test_creates_two_figures_per_instance_with_its_own_runs_and_baseline(self):
+        baseline_name = "aaaaaaa_20261023-160000.000000Z_timing_+Baseline"
+        changed_name = "bbbbbbb_20261023-170000.000000Z_timing_+Changed"
+        self.save_run(baseline_name, [4, 6])
+        self.save_run(changed_name, [2, 3], instance="0002-1000")
+        self.save_run(baseline_name, [40, 60], instance="0002-100000")
+        self.save_run(changed_name, [20, 30], instance="0001-100000")
+        output = self.results / "plots"
+        matplotlib = mock.MagicMock()
+        messages = io.StringIO()
+        # Exercise CLI grouping without making Matplotlib a test-suite dependency.
+        with mock.patch.dict("sys.modules", {
+                "matplotlib": matplotlib, "matplotlib.pyplot": matplotlib.pyplot}), \
+                mock.patch.object(plotter, "draw_figure") as draw, \
+                contextlib.redirect_stdout(messages):
+            self.assertEqual(plotter.main([
+                "--results-dir", str(self.results), "--output-dir", str(output)]), 0)
+
+        self.assertEqual(draw.call_count, 4)
+        calls = {call.args[4].name: call for call in draw.call_args_list}
+        self.assertEqual(set(calls), {
+            "raw_time_1000.png", "speedup_1000.png",
+            "raw_time_100000.png", "speedup_100000.png"})
+        for instance, raw, reference in (
+                ("1000", [[4, 6], [2, 3]], 5),
+                ("100000", [[40, 60], [20, 30]], 50)):
+            for kind in ("raw_time", "speedup"):
+                call = calls["{}_{}.png".format(kind, instance)]
+                _, runs, observations, baseline, path = call.args
+                self.assertEqual([run.instance for run in runs], [instance, instance])
+                self.assertEqual([run.label for run in runs], ["+Baseline", "+Changed"])
+                self.assertIs(baseline, runs[0])
+                self.assertEqual(statistics.mean(baseline.samples), reference)
+                expected = raw if kind == "raw_time" else [
+                    [reference / sample for sample in samples] for samples in raw]
+                self.assertEqual(observations, expected)
+                self.assertEqual(call.kwargs["speedup"], kind == "speedup")
+                self.assertEqual(path.parent, output)
+                self.assertIn("Saved {}".format(path), messages.getvalue())
+
+    def test_unfinished_runs_are_skipped_but_successful_runs_require_samples(self):
+        self.save_run("aaaaaaa_20261023-160000.000000Z_timing_+Baseline", [2, 4])
+        unfinished = self.save_run("bbbbbbb_20261023-170000.000000Z_timing", [1, 2])
+        (unfinished / "status.json").unlink()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            runs = plotter.load_results(self.results)["1000"]
+        self.assertEqual(len(runs), 1)
+        self.assertIn("no timing status yet", errors.getvalue())
+        (unfinished / "status.json").write_text(json.dumps({"status": "ok"}))
+        (unfinished / "samples.csv").unlink()
+        with self.assertRaisesRegex(ValueError, "samples.csv"):
+            plotter.load_results(self.results)
 
     def test_rejects_invalid_samples_and_incomparable_inputs(self):
         first = self.save_run("aaaaaaa_20261023-160000.000000Z_timing_+Baseline", [2, 4])
