@@ -743,8 +743,71 @@ static void test_invalid_input(void)
     assert(fclose(file) == 0);
 }
 
+static void test_solver_equivalence(void)
+{
+    const ReferenceBody bodies[] = {
+        {2, {1, 2, 3}, {0.1, 0.2, 0.3}, {1, -2, 3}},
+        {3, {1, 2, 3}, {0.1, 0.2, 0.3}, {1, -2, 3}},
+        {4, {-2, 1, 0}, {-0.2, 0.1, 0.4}, {-1, 3, 2}}
+    };
+    assert(gravity_solver_by_name("direct") == gravity_direct);
+    assert(gravity_solver_by_name("approximate") == gravity_approximate);
+    assert(gravity_solver_by_name("unknown") == NULL);
+    for (size_t count = 0; count <= 3; ++count) {
+        for (size_t steps = 0; steps <= 4; ++steps) {
+            Simulation legacy = from_bodies(bodies, count);
+            Simulation direct = from_bodies(bodies, count);
+            Simulation approximate = from_bodies(bodies, count);
+            simulate(&legacy, 0.01, steps, gravity);
+            simulate_with_solver(&direct, 0.01, steps, gravity_direct, NULL);
+            simulate_with_solver(&approximate, 0.01, steps, gravity_approximate, NULL);
+            for (size_t i = 0; i < count; ++i) {
+                assert_body_equal(body_at(&legacy, i), body_at(&direct, i));
+                assert_body_equal(body_at(&direct, i), body_at(&approximate, i));
+            }
+            free(legacy.storage);
+            free(direct.storage);
+            free(approximate.storage);
+        }
+    }
+}
+
+static void check_solver_snapshot(const SimulationView *state, double *ax,
+                                  double *ay, double *az, void *context)
+{
+    size_t *calls = context;
+    assert(state->count == 1);
+    assert(state->x[0] == (*calls == 0 ? 2.0 : 3.125));
+    assert(state->vx[0] == (*calls == 0 ? 4.5 : 7.0));
+    assert(state->ax[0] == (*calls == 0 ? 2.0 : 10.0));
+    ax[0] = 10.0 + *calls;
+    ay[0] = 20.0 + *calls;
+    az[0] = 30.0 + *calls;
+    ++*calls;
+}
+
+static void test_solver_context_and_order(void)
+{
+    ReferenceBody body = {1, {1, 2, 3}, {4, 5, 6}, {2, 4, 6}};
+    Simulation simulation = from_bodies(&body, 1);
+    size_t calls = 0;
+    double *original_ax = simulation.ax;
+    simulate_with_solver(&simulation, 0.25, 0, check_solver_snapshot, &calls);
+    assert(calls == 0 && simulation.ax == original_ax);
+    simulate_with_solver(&simulation, 0.25, 2, check_solver_snapshot, &calls);
+    assert(calls == 2 && simulation.ax == original_ax);
+    assert_vec(body_at(&simulation, 0).acceleration, (Vec3){11, 21, 31});
+    free(simulation.storage);
+    simulation = from_bodies(NULL, 0);
+    simulate_with_solver(&simulation, 0.25, 2, check_solver_snapshot, &calls);
+    assert(calls == 2);
+    free(simulation.storage);
+}
+
 int main(void)
 {
+    test_solver_equivalence();
+    test_solver_context_and_order();
     test_gravity();
     test_gravity_accelerations();
     test_gravity_workspace_initialization();

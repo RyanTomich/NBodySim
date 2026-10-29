@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot runtime and speedup for each input, with all samples, means, and sample SDs."""
+"""Plot time per step and speedup, with all run averages, means, and sample SDs."""
 
 import argparse
 import csv
@@ -27,7 +27,7 @@ class Timing:
     run: Path
     label: str
     instance: str
-    samples: list
+    samples: list  # Whole-run averages in seconds per step.
     input_path: Path
 
 
@@ -39,7 +39,7 @@ def run_details(run):
 
 
 def load_results(results_dir):
-    """Keep runs separate and read raw samples, never averages of summaries."""
+    """Normalize each raw duration by its run's step count; keep runs separate."""
     groups = {}
     for directory in sorted(results_dir.glob("*/*/timing")):
         if not (directory / "status.json").exists():
@@ -51,10 +51,18 @@ def load_results(results_dir):
                 reason = status.get("error", "timing did not finish successfully")
                 print("Skipping {}: {}".format(directory, reason), file=sys.stderr)
                 continue
+            if "steps" not in status:
+                print("Skipping {}: no recorded step count; cannot calculate time per step".format(
+                    directory), file=sys.stderr)
+                continue
+            steps = status["steps"]
+            if type(steps) is not int or steps <= 0:
+                raise ValueError("expected a positive integer step count")
             with (directory / "samples.csv").open(newline="") as source:
                 samples = [float(row["seconds"]) for row in csv.DictReader(source)]
             if len(samples) < 2 or any(not math.isfinite(x) or x < 0 for x in samples):
                 raise ValueError("expected at least two finite, nonnegative timings")
+            samples = [sample / steps for sample in samples]
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
             # Do not silently discard observations from a successful but corrupt run.
             raise ValueError("{}: {}".format(directory, error)) from error
@@ -62,11 +70,13 @@ def load_results(results_dir):
         run = directory.parent.parent
         _, label = run_details(run)
         instance = re.sub(r"^\d+-", "", directory.parent.name)
+        if status.get("solver"):
+            label += " [" + status["solver"] + "]"
         timing = Timing(run, label, instance, samples, directory.parent / "input.txt")
         groups.setdefault(instance, []).append(timing)
 
     if not groups:
-        raise ValueError("No successful timing results found in {}".format(results_dir))
+        raise ValueError("No successful timing results with recorded step counts found in {}".format(results_dir))
     for runs in groups.values():
         runs.sort(key=lambda timing: (run_details(timing.run)[0], timing.run.name))
     return dict(sorted(groups.items()))
@@ -74,18 +84,18 @@ def load_results(results_dir):
 
 def choose_baseline(runs, requested=None):
     if requested:
-        matches = [run for run in runs if requested in (run.label, run.run.name)]
+        matches = [run for run in runs if requested in (run.label, run.run.name, run_details(run.run)[1])]
         if len(matches) != 1:
             raise ValueError(
                 "Input {}: baseline {!r} matches {} runs; use a unique label or "
                 "the full result directory name".format(runs[0].instance, requested, len(matches))
             )
         return matches[0]
-    return next((run for run in runs if run.label.lstrip("+").casefold() == "baseline"), runs[0])
+    return next((run for run in runs if run_details(run.run)[1].lstrip("+").casefold() == "baseline"), runs[0])
 
 
 def speedup_samples(runs, baseline):
-    """Normalize each observation by the fixed baseline arithmetic mean."""
+    """Compare each time per step against the fixed baseline mean time per step."""
     reference = statistics.mean(baseline.samples)
     if any(sample <= 0 for run in runs for sample in run.samples):
         raise ValueError("Input {}: speedup requires positive timings".format(baseline.instance))
@@ -98,6 +108,9 @@ def speedup_samples(runs, baseline):
 
 
 def draw_figure(plt, runs, observations, baseline, output, speedup=False):
+    # Keep calculations in seconds per step; display runtime in milliseconds.
+    if not speedup:
+        observations = [[sample * 1000 for sample in samples] for samples in observations]
     # Keep each result about an inch apart; long labels should not widen every gap.
     width = max(5.2, 1.2 + len(runs))
     labels = ["\n".join(textwrap.fill(part, width=14, break_on_hyphens=False)
@@ -121,8 +134,8 @@ def draw_figure(plt, runs, observations, baseline, output, speedup=False):
         ax.axhline(1, color="#999999", linewidth=0.8, linestyle="--", zorder=1)
     ax.set_xticks(range(len(runs)))
     ax.set_xticklabels(labels, fontsize=9)
-    ax.set_ylabel("Speedup (×)" if speedup else "Time (s)")
-    title = "Speedup vs {}".format(baseline.label) if speedup else "Runtime"
+    ax.set_ylabel("Speedup (×)" if speedup else "Time per step (ms)")
+    title = "Speedup vs {}".format(baseline.label) if speedup else "Time per simulation step"
     title = textwrap.fill(title, width=int(width * 10))
     ax.set_title("{}\nInput {}".format(title, runs[0].instance), loc="left", pad=12)
     ax.set_xlim(-0.5, len(runs) - 0.5)
@@ -135,9 +148,9 @@ def draw_figure(plt, runs, observations, baseline, output, speedup=False):
         ax.spines[spine].set_visible(False)
     ax.spines["bottom"].set_color("#cccccc")
 
-    note = "Faint dots: all samples\nMarkers + error bars: mean ± 1 sample SD"
+    note = "Faint dots: whole-run averages per step\nMarkers + error bars: mean ± 1 sample SD across runs"
     if speedup:
-        note += "\nEach sample = baseline mean time / measured time"
+        note += "\nSpeedup = baseline mean time per step / measured time per step"
     fig.text(0.5, 0.025, note, ha="center", va="bottom", fontsize=9, color="#666666")
     fig.tight_layout(rect=(0, 0.14 if speedup else 0.11, 1, 1), pad=1.2)
     fig.savefig(output, dpi=220, facecolor="white")

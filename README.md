@@ -1,7 +1,7 @@
 # 3D N-body baseline
 
-A minimal serial C17 simulator. Each step evaluates every ordered pair of
-distinct bodies: O(n²) work per step and O(n) memory. Requires Make and a C
+A minimal serial C17 simulator. The direct gravity solver evaluates each
+unordered pair of distinct bodies once: O(n²) work per step and O(n) memory. Requires Make and a C
 compiler on a Unix-like system; no external libraries or OpenMP are needed.
 Benchmark orchestration, generation, and the full test suite require Python 3.8+
 (standard library only).
@@ -12,10 +12,20 @@ make
 make test
 ```
 
-The command is `./build/app INPUT DT STEPS`. `DT` must be positive and finite;
+The command is `./build/app [--solver direct|approximate] INPUT DT STEPS`.
+`DT` must be positive and finite;
 `STEPS` must be a nonnegative integer. The final state goes to stdout. Errors go
 to stderr and return a nonzero exit status. Zero steps returns the input state
 unchanged, although numeric formatting may change.
+
+The default solver is `direct`. `approximate` is currently an **exact O(n²)
+placeholder** that delegates to the direct kernel; its body in `src/approximate.c`
+is the replacement point for a future approximation. Both solvers are compiled
+into the same executable and share the Euler loop and instance format.
+
+```sh
+./build/app --solver approximate tests/data/two_body.txt 0.01 100 > build/final-approximate.txt
+```
 
 ## Instance format
 
@@ -90,7 +100,7 @@ which would also measure file loading and output.
 
 | Mode | What it measures | Where it runs |
 | --- | --- | --- |
-| `timing` | Repeated runtime samples, mean, variance, and standard deviation | macOS or Linux |
+| `timing` | Whole-run samples; mean, variance, and standard deviation of time per step | macOS or Linux |
 | `profile` | Sampled CPU call stacks and a function-level report | Linux with usable `perf` |
 | `counters` | Hardware events, including cache references and misses | Linux with access to the requested counters |
 | `all` | Each of the above in separate executions | Linux for complete results; macOS saves timing plus failure statuses for the other modes |
@@ -132,14 +142,30 @@ exact-directory `--output` option.
 
 ### Measurement boundary
 
-The measured region is the entire `simulate(...)` call, which performs no
+The measured region is the entire `simulate_with_solver(...)` call, which performs no
 allocation or data conversion. State and acceleration workspace are allocated
 before measurement. Instance parsing, copying/resetting state, result validation,
 deallocation, and file writing are outside the region. Every warmup and sample
 starts from the same initial bodies in a warm process. A nonfinite final state
 fails the run. Timing uses `CLOCK_MONOTONIC` wall-clock seconds, retains all raw
-samples, and reports mean, sample variance (`n - 1` denominator, seconds²), and
-standard deviation. Profiling and counters never contribute runtime samples.
+whole-run samples in `samples.csv` (`sample,seconds`). Reporting divides each
+sample by `--steps`, then computes the mean, sample variance (`n - 1` denominator),
+and standard deviation. The normalization is by the number of integration steps,
+not by `dt` or elapsed simulated time. There are no timers around individual steps.
+Profiling and counters never contribute runtime samples.
+
+Both `timing/summary.csv` and the aggregate `timing-summary.csv` record `solver`,
+`steps`, `dt`, `samples`, `mean_seconds_per_step`,
+`variance_seconds_per_step_squared`, and `stddev_seconds_per_step`; the aggregate
+also includes `instance`. Variance has units of (seconds/step)² and scales by
+`1 / steps²`; mean and standard deviation scale by `1 / steps`. These columns
+replace the previous total-time summary columns. Each mode's `status.json` also
+records `steps` and `dt`.
+
+The terminal reports one line per timed input, for example:
+`Timing 0001-1000 [approximate]: 0.689 ± 0.158 ms/step (mean ± sample SD; 10 steps, 30 samples)`.
+The standard deviation describes variation between whole-run averages per step,
+not variation between individual steps within a run.
 Older revisions allocated workspace inside `simulate`; exclude that allocation
 from the baseline as well when comparing layout changes alone.
 
@@ -214,9 +240,9 @@ A single-mode run creates only that mode's subdirectory. The main files are:
 
 | Location relative to the experiment directory | Expected contents |
 | --- | --- |
-| `timing-summary.csv` | Runtime summaries across instances (`timing` and `all`) |
-| `0001-1000/timing/samples.csv` | Individual durations in seconds |
-| `0001-1000/timing/summary.csv` | Mean, sample variance in seconds², and standard deviation |
+| `timing-summary.csv` | Time-per-step summaries across instances (`timing` and `all`) |
+| `0001-1000/timing/samples.csv` | Raw whole-run durations in seconds |
+| `0001-1000/timing/summary.csv` | Mean and standard deviation in seconds/step, variance in (seconds/step)², and run parameters |
 | `0001-1000/profile/report.txt` | Readable function/call-graph profile |
 | `0001-1000/profile/perf.data` | Raw Linux perf recording |
 | `0001-1000/profile/sample-events.txt` | Events used to check that the recording contains samples |
@@ -255,6 +281,51 @@ stays in files. A failed mode or input produces a nonzero exit status, while
 results and explicit unsupported-platform statuses for Linux-only modes.
 `make clean` preserves `results/`. Avoid editing sources during an experiment.
 
+### Select a solver and evaluate error
+
+Every runner mode accepts `--solver direct|approximate` (default `direct`) and
+optional `--compare-direct`:
+
+```sh
+python3 bench/run.py timing tests/data/two_body.txt --dt 0.0001 --steps 100 \
+  --samples 30 --solver approximate --compare-direct
+```
+
+Solver selection applies to warmups and measured calls. Each mode's `status.json`,
+`timing/summary.csv`, and the aggregate `timing-summary.csv` identify the selected
+solver. The generator, input files, and timing sample format stay the same.
+
+With `--compare-direct`, the runner executes one additional direct trajectory per
+input after all measurement modes finish, starting from the archived input with
+identical `dt` and `steps`. The archived benchmark executable runs this reference
+without timers, warmups, or perf gates. Reference work and Python error evaluation
+are outside every measured interval. The internal driver CLI is
+`INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate]`;
+`reference` requires one sample, zero warmups, and the direct solver.
+
+Each input gains `reference/final.txt`, `reference/status.json`, and process logs.
+Each successful measurement mode gains `error.csv` and `error-status.json`.
+The CSV has a row for position, velocity, and acceleration, with these columns:
+
+- `rms_error`: square root of the mean squared Euclidean error per body.
+- `max_error`: maximum Euclidean error over bodies.
+- `relative_l2_error`: total difference L2 norm divided by the reference L2 norm.
+- `relative_status`: `ok`, or `undefined` when the reference norm is zero and
+  the error is nonzero; the relative value is then empty. Both norms zero gives zero.
+
+Empty states have zero error. Bodies are matched by input order; count or mass
+changes, malformed/nonfinite states, and nonfinite metrics fail evaluation.
+The direct reference is also checked against the original input's counts and masses.
+An evaluation failure returns a nonzero overall status but preserves measurement
+statuses, samples, and summaries. Check `reference/status.json` and each
+`error-status.json` as well as the measurement status. No accuracy threshold is
+imposed. Without `--compare-direct`, there is no reference run or evaluation output.
+
+These metrics measure **final trajectory differences**, including accumulated
+drift. Final accelerations may be evaluated at different positions once the
+approximate solver changes; they do not isolate force error on identical positions.
+While the placeholder uses the direct kernel, all reported errors should be zero.
+
 ### Plot saved timings
 
 Install Matplotlib in a virtual environment, then run the root-level plotter:
@@ -265,27 +336,38 @@ build/plot-venv/bin/python -m pip install matplotlib
 build/plot-venv/bin/python plot_results.py
 ```
 
-This reads every successful `timing/samples.csv` in `results/` and saves
+This reads successful `timing/samples.csv` files with recorded step counts in
+`results/`, divides each raw duration by its run's `steps`, and saves
 two images per test instance: `plots/raw_time_<instance>.png` and
 `plots/speedup_<instance>.png`. For example, inputs named `1000` and `100000`
 produce four images, each accumulating all successful runs for that input.
 Labels use the suffix after the run
 type: `c7a9d7e_20261023-160502.425884Z_timing_+Linking` becomes `+Linking`.
-Runs appear in chronological order. Each input gets its own baseline and axes;
-failed or unfinished timing runs are skipped with a message. Compact figures
+New runs append the solver to the label, such as `+Linking [approximate]`; older
+results without solver metadata retain their labels. Runs appear in chronological
+order. Each input gets its own baseline and axes;
+failed or unfinished timing runs are skipped with a message. Historical runs
+without `steps` in their timing status are also skipped with an explanation;
+step counts cannot be inferred from saved durations. Present but invalid step
+counts are errors. No historical results are modified. Compact figures
 wrap long labels to avoid excessive spacing between results.
 
-Every sample appears as a faint dot with horizontal jitter. Separate markers show
-the arithmetic means, with error bars of ± one sample standard deviation and no
-lines connecting means. Speedup samples are the baseline's mean time divided by
-each measured time; the markers and error bars summarize those ratios.
+Time plots use milliseconds per simulation step (`Time per step (ms)`), while
+retaining the `raw_time_<instance>.png` filenames. Every run's average per step
+appears as a faint dot with horizontal jitter. Separate markers show arithmetic
+means, with error bars of ± one sample standard deviation across runs and no
+lines connecting means. These bars do not measure variation between individual
+steps. Speedup samples are the baseline's mean time per step divided by each
+run's time per step; the markers and error bars summarize those ratios.
 Baseline uncertainty is not propagated,
 and the baseline's own mean ratio can be slightly above 1 because of the
 reciprocal transformation. The default reference is the earliest run labelled
 `+Baseline` (or `Baseline`), otherwise the earliest run for that input. Override
-it with `--baseline LABEL` or a full result directory name. Use comparable `DT`
-and `STEPS` across experiments; these parameters are not saved in the timing
-CSVs. The script checks that each input matches the baseline's archived input.
+it with `--baseline LABEL` or a full result directory name. Runs with different
+step counts can be compared using normalized times; `steps` and `dt` are saved
+in the summaries and mode statuses. Different `dt` values or trajectory lengths
+can still change the workload, so normalization does not guarantee identical
+conditions. The script checks that each input matches the baseline's archived input.
 
 Use `--results-dir PATH` and `--output-dir PATH` to select other directories.
 Re-running updates each instance's two images with all available results; saved
@@ -301,8 +383,26 @@ bool simulation_create(Simulation *simulation, size_t count);
 SimulationView simulation_view(const Simulation *simulation);
 typedef Vec3 (*Interaction)(const SimulationView *state, size_t target, size_t source);
 
+typedef void (*AccelerationSolver)(const SimulationView *state, double *ax,
+                                   double *ay, double *az, void *context);
+void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
+                          AccelerationSolver solver, void *context);
 void simulate(Simulation *simulation, double dt, size_t steps, Interaction f);
 ```
+
+`simulate_with_solver` owns the shared Euler loop. Once per step it invokes the
+whole-system solver with read-only state and three disjoint output arrays. The
+solver must fill every output without modifying state or allocating. The caller
+owns `context` and any workspace it points to; prepare that workspace before
+simulation and reuse it between steps. Both supplied gravity solvers accept NULL
+context. Zero bodies or zero steps makes no solver call.
+
+`gravity_solver_by_name` resolves `direct` and `approximate` to separate callbacks;
+unknown names return NULL. `gravity_direct` wraps the existing optimized O(n²)
+kernel. `gravity_approximate` currently calls that same implementation.
+The original `simulate(..., Interaction)` remains a compatibility wrapper: gravity
+uses the direct callback, and other interactions use the original ordered-pair
+calculation through an adapter. Both paths share the same integration loop.
 
 `Simulation` owns one allocation with thirteen contiguous arrays of `count`
 doubles, initially ordered as `w`, `x`, `y`, `z`, `vx`, `vy`, `vz`, `ax`, `ay`,
@@ -416,7 +516,8 @@ detect numerical overflow during evolution.
 
 - `src/nbody.h` and `src/nbody.c`: array types, callback, and serial simulation.
 - `src/state.c`: one-time allocation and read-only array views.
-- `src/gravity.h` and `src/gravity.c`: gravitational interaction only.
+- `src/gravity.h` and `src/gravity.c`: gravitational interaction, direct kernel, and solver lookup.
+- `src/approximate.c`: replaceable approximate solver (currently exact).
 - `src/io.h` and `src/io.c`: text input/output and numeric parsing.
 - `src/main.c`: command-line arguments and selection of the gravity callback.
 - `bench/`: separate measurement driver, Linux event gate, and Python runner.
@@ -457,4 +558,4 @@ make LTO=0
 Run `make clean` before manual builds with different compiler settings, including
 switching `LTO` between `0` and `1`; the benchmark runner always forces a fresh
 build. Use `make print-config` (or `make LTO=0 print-config`) to inspect the
-selected configuration. The simulation and callback interfaces are unchanged.
+selected configuration. The legacy simulation and interaction interfaces remain available.

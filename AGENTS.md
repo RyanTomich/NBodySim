@@ -41,13 +41,13 @@ the runner command with `LTO=0` for a non-LTO comparison.
 ## Running Benchmarks and Finding Results
 
 Run from the repository root using Python 3.8+ and a checkout with a valid Git
-commit. Use the runner so only `simulate(...)` is measured; do not profile the
+commit. Use the runner so only `simulate_with_solver(...)` is measured; do not profile the
 ordinary application's loading and output by wrapping `build/app` in perf.
 State/workspace allocation, parsing, reset, validation, and output stay outside
-the measured call; `simulate` performs no allocation or conversion.
+the measured call; `simulate_with_solver` performs no allocation or conversion.
 
 ```sh
-# Timing: macOS or Linux; mean and sample variance over 30 runs.
+# Timing: macOS or Linux; mean and sample variance of time per step over 30 runs.
 python3 bench/run.py timing tests/data/*.txt --dt 0.0001 --steps 10 --samples 30
 
 # Profiling: Linux perf CPU call stacks and function report.
@@ -68,6 +68,15 @@ python3 bench/run.py all tests/data/*.txt --dt 0.0001 --steps 100 --samples 30
 `--samples` is available only for `timing` and `all`. Profiling/counters each
 measure one call. Every mode defaults to `--warmups 1`; state resets before each
 call. Use `--results-dir PATH` to change the parent directory.
+
+Measure the entire simulation call. Keep `samples.csv` as raw whole-run seconds;
+normalize each sample by `--steps` only for summaries and plotting (never by
+`dt`). Summary CSVs record solver, steps, dt, samples, `mean_seconds_per_step`,
+`variance_seconds_per_step_squared`, and `stddev_seconds_per_step`. Each mode's
+`status.json` records steps and dt. Terminal output and runtime plots use ms/step;
+standard deviations describe variation across whole-run averages, not individual
+steps. The plotter skips older runs without recorded step counts with an
+explanation; preserve those files unchanged.
 
 The printed result path is `results/<short-hash>_<UTC-timestamp>_<type>/`.
 Each run retains `bench` and combined `build.stdout.log`. Each input gets a

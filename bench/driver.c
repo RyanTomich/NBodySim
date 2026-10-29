@@ -54,17 +54,21 @@ int main(int argc, char **argv)
 {
     double dt;
     size_t steps, samples, warmups;
-    if (argc != 8) {
-        fprintf(stderr, "Usage: %s INPUT DT STEPS SAMPLES WARMUPS timing|perf FINAL_FILE\n", argv[0]);
+    if (argc != 8 && argc != 9) {
+        fprintf(stderr, "Usage: %s INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate]\n", argv[0]);
         return EXIT_FAILURE;
     }
     bool timing = strcmp(argv[6], "timing") == 0;
-    if ((!timing && strcmp(argv[6], "perf") != 0)
+    bool perf = strcmp(argv[6], "perf") == 0;
+    bool reference = strcmp(argv[6], "reference") == 0;
+    AccelerationSolver solver = gravity_solver_by_name(argc == 9 ? argv[8] : "direct");
+    if ((!timing && !perf && !reference) || !solver
         || !parse_double(argv[2], &dt) || dt <= 0.0
         || !parse_size(argv[3], &steps) || steps == 0
         || !parse_size(argv[4], &samples) || samples == 0
         || samples > SIZE_MAX / sizeof(double)
         || !parse_size(argv[5], &warmups)
+        || (reference && (solver != gravity_direct || warmups != 0))
         || (!timing && samples != 1)) {
         fprintf(stderr, "Invalid benchmark arguments.\n");
         return EXIT_FAILURE;
@@ -95,7 +99,7 @@ int main(int argc, char **argv)
 
     for (size_t i = 0; i < warmups; ++i) {
         reset_state(&simulation, &initial);
-        simulate(&simulation, dt, steps, gravity);
+        simulate_with_solver(&simulation, dt, steps, solver, NULL);
         if (!finite_state(&simulation)) {
             fprintf(stderr, "Warmup produced a nonfinite state.\n");
             goto cleanup;
@@ -110,12 +114,12 @@ int main(int argc, char **argv)
                 perror("clock_gettime");
                 goto cleanup;
             }
-        } else if (!perf_gate(true)) {
+        } else if (perf && !perf_gate(true)) {
             perror("enable perf events");
             goto cleanup;
         }
 
-        simulate(&simulation, dt, steps, gravity);
+        simulate_with_solver(&simulation, dt, steps, solver, NULL);
 
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
@@ -124,7 +128,7 @@ int main(int argc, char **argv)
             }
             durations[i] = (double)(end.tv_sec - start.tv_sec)
                 + (double)(end.tv_nsec - start.tv_nsec) * 1e-9;
-        } else if (!perf_gate(false)) {
+        } else if (perf && !perf_gate(false)) {
             perror("disable perf events");
             goto cleanup;
         }

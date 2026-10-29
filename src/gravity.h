@@ -19,4 +19,14 @@ Vec3 gravity(const SimulationView *state, size_t target, size_t source);
 void gravity_accelerations(const SimulationView *state, double *restrict ax,
                            double *restrict ay, double *restrict az);
 
+/* Whole-system solvers; context is unused and may be NULL. The approximate
+ * solver is currently an exact placeholder delegating to the direct kernel.
+ */
+void gravity_direct(const SimulationView *state, double *ax, double *ay,
+                    double *az, void *context);
+void gravity_approximate(const SimulationView *state, double *ax, double *ay,
+                         double *az, void *context);
+/* Resolve "direct" or "approximate"; unknown names return NULL. */
+AccelerationSolver gravity_solver_by_name(const char *name);
+
 #endif

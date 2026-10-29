@@ -40,6 +40,21 @@ SimulationView simulation_view(const Simulation *simulation);
 /* Return the source's acceleration contribution to the target, without mutation. */
 typedef Vec3 (*Interaction)(const SimulationView *state, size_t target, size_t source);
 
+/* Fill all three count-element outputs without modifying state or allocating.
+ * Outputs must be disjoint from each other and state. Context is caller-owned;
+ * any solver workspace must be prepared before simulation and reused per step.
+ */
+typedef void (*AccelerationSolver)(const SimulationView *state, double *ax,
+                                   double *ay, double *az, void *context);
+
+/* Shared forward Euler loop with a whole-system acceleration solver.
+ * Same storage, timestep, update order, and pointer lifetime contracts as simulate.
+ * The solver must be nonnull; context may be NULL if the solver permits it.
+ * Zero count or zero steps does not invoke the solver.
+ */
+void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
+                          AccelerationSolver solver, void *context);
+
 /* Update in place using forward Euler, then recompute acceleration with f.
  * Input accelerations drive the first step. No allocation or argument validation.
  * Each step swaps ax/ay/az with next_ax/next_ay/next_az after all interactions.

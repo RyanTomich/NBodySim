@@ -41,4 +41,18 @@ cmp build/cli-expected.txt build/cli-output.txt
 ./build/app tests/data/two_body.txt 0.01 10 > build/cli-direct.txt
 cmp build/cli-resumed.txt build/cli-direct.txt
 
+# Either solver is selectable before or after positional arguments.
+for solver in direct approximate; do
+    for steps in 0 1 2 3; do
+        ./build/app tests/data/two_body.txt 0.01 "$steps" > build/cli-default.txt
+        ./build/app --solver "$solver" tests/data/two_body.txt 0.01 "$steps" > build/cli-output.txt
+        cmp build/cli-default.txt build/cli-output.txt
+        ./build/app tests/data/two_body.txt 0.01 "$steps" --solver "$solver" > build/cli-output.txt
+        cmp build/cli-default.txt build/cli-output.txt
+    done
+done
+expect_failure tests/data/two_body.txt 0.01 1 --solver
+expect_failure tests/data/two_body.txt 0.01 1 --solver unknown
+expect_failure --solver direct tests/data/two_body.txt 0.01 1 --solver approximate
+
 printf 'All CLI tests passed.\n'

@@ -1,5 +1,7 @@
 /* Test double: confirms warmups are ungated and every call sees initial state. */
 #include "nbody.h"
+#include "gravity.h"
+#include <string.h>
 #include "perf_gate.h"
 
 #include <assert.h>
@@ -17,10 +19,13 @@ bool perf_gate(bool enable)
     return true;
 }
 
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
+void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
+                          AccelerationSolver solver, void *context)
 {
     (void)dt;
-    (void)f;
+    assert(context == NULL);
+    const char *expected = getenv("BENCH_TEST_SOLVER");
+    assert(solver == gravity_solver_by_name(expected ? expected : "direct"));
     assert(simulation->count == 1);
     double *fields[] = {
         simulation->w, simulation->x, simulation->y, simulation->z,

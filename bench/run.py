@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure simulate() and save results with the exact benchmark executable."""
+"""Measure simulate_with_solver() and save results with the exact benchmark executable."""
 
 import argparse
 from contextlib import ExitStack
@@ -53,12 +53,111 @@ def run_logged(command, directory, stdout="stdout.log", stderr="stderr.log"):
             return 127
 
 
-def timing_summary(durations):
+def timing_summary(durations, steps):
+    """Summarize whole-run averages per integration step, in seconds per step."""
+    if type(steps) is not int or steps <= 0:
+        raise ValueError("timing requires a positive integer step count")
     if len(durations) < 2 or any(not math.isfinite(x) or x < 0 for x in durations):
         raise ValueError("timing requires at least two finite nonnegative samples")
-    return {"samples": len(durations), "mean_seconds": statistics.mean(durations),
-            "variance_seconds_squared": statistics.variance(durations),
-            "stddev_seconds": statistics.stdev(durations)}
+    per_step = [duration / steps for duration in durations]
+    return {"samples": len(durations), "mean_seconds_per_step": statistics.mean(per_step),
+            "variance_seconds_per_step_squared": statistics.variance(per_step),
+            "stddev_seconds_per_step": statistics.stdev(per_step)}
+
+
+def read_state(path):
+    """Read the saved instance format, rejecting malformed/nonfinite states."""
+    tokens = path.read_text().split()
+    if not tokens or not re.fullmatch(r"[0-9]+", tokens[0]):
+        raise ValueError("Invalid body count in {}".format(path))
+    count = int(tokens[0])
+    if len(tokens) != 1 + 10 * count:
+        raise ValueError("Incorrect state length in {}".format(path))
+    if any(len(token) > 127 or not token.isascii() or "_" in token for token in tokens):
+        raise ValueError("Invalid numeric token in {}".format(path))
+    try:
+        # strtod in the C reader also accepts hexadecimal floating-point tokens.
+        values = [float.fromhex(token) if token.lstrip("+-").lower().startswith("0x")
+                  else float(token) for token in tokens[1:]]
+    except OverflowError as error:
+        raise ValueError("Nonfinite state in {}".format(path)) from error
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError("Nonfinite state in {}".format(path))
+    rows = [values[i:i + 10] for i in range(0, len(values), 10)]
+    if any(row[0] <= 0 for row in rows):
+        raise ValueError("Nonpositive mass in {}".format(path))
+    return rows
+
+
+def validate_bodies(actual, reference):
+    if len(actual) != len(reference):
+        raise ValueError("Body counts differ")
+    if any(a[0] != b[0] for a, b in zip(actual, reference)):
+        raise ValueError("Body masses changed")
+
+
+def trajectory_errors(actual, reference):
+    """Errors over ordered bodies; positions, velocities and accelerations separate."""
+    validate_bodies(actual, reference)
+    if any(not math.isfinite(value) for state in (actual, reference)
+           for row in state for value in row):
+        raise ValueError("Nonfinite state")
+    rows = []
+    for field, start in (("position", 1), ("velocity", 4), ("acceleration", 7)):
+        error_norm = reference_norm = maximum = 0.0
+        for a, b in zip(actual, reference):
+            distance = math.hypot(*(a[j] - b[j] for j in range(start, start + 3)))
+            error_norm = math.hypot(error_norm, distance)
+            reference_norm = math.hypot(reference_norm, *b[start:start + 3])
+            maximum = max(maximum, distance)
+        rms = error_norm / math.sqrt(len(actual)) if actual else 0.0
+        relative = error_norm / reference_norm if reference_norm else (0.0 if not error_norm else None)
+        metrics = [error_norm, reference_norm, rms, maximum]
+        if relative is not None:
+            metrics.append(relative)
+        if any(not math.isfinite(value) for value in metrics):
+            raise ValueError("Nonfinite error metric for " + field)
+        rows.append({"field": field, "rms_error": rms, "max_error": maximum,
+                     "relative_l2_error": relative,
+                     "relative_status": "ok" if relative is not None else "undefined"})
+    return rows
+
+
+def compare_direct(binary, instance, folder, modes, args):
+    """One ungated reference call per input, after all measurement modes finish."""
+    directory = folder / "reference"
+    directory.mkdir()
+    status = {"solver": "direct", "steps": args.steps, "dt": args.dt,
+              "started": now(), "status": "failed"}
+    reference = None
+    try:
+        command = [binary, instance, str(args.dt), str(args.steps), "1", "0",
+                   "reference", directory / "final.txt", "direct"]
+        if run_logged(command, directory):
+            raise RuntimeError("Direct reference failed; see reference/stderr.log.")
+        reference = read_state(directory / "final.txt")
+        validate_bodies(reference, read_state(instance))
+        status["status"] = "ok"
+    except (OSError, ValueError, RuntimeError) as error:
+        status["error"] = str(error)
+    status["finished"] = now()
+    write_json(directory / "status.json", status)
+    failed = status["status"] != "ok"
+    for mode in modes:
+        comparison = {"solver": args.solver, "reference_solver": "direct",
+                      "started": now(), "status": "failed"}
+        try:
+            if status["status"] != "ok":
+                raise RuntimeError(status["error"])
+            rows = trajectory_errors(read_state(folder / mode / "final.txt"), reference)
+            write_csv(folder / mode / "error.csv", list(rows[0]), rows)
+            comparison["status"] = "ok"
+        except (OSError, ValueError, RuntimeError) as error:
+            comparison["error"] = str(error)
+            failed = True
+        comparison["finished"] = now()
+        write_json(folder / mode / "error-status.json", comparison)
+    return not failed
 
 
 def parse_counters(text):
@@ -120,7 +219,8 @@ def perf_available():
 
 def collect(mode, binary, instance, directory, args):
     directory.mkdir()
-    status = {"mode": mode, "started": now(), "status": "failed"}
+    status = {"mode": mode, "solver": args.solver, "steps": args.steps, "dt": args.dt,
+              "started": now(), "status": "failed"}
     summary = None
     try:
         if mode != "timing":
@@ -130,7 +230,7 @@ def collect(mode, binary, instance, directory, args):
         samples = args.samples if mode == "timing" else 1
         driver = [binary, instance, str(args.dt), str(args.steps), str(samples),
                   str(args.warmups), "timing" if mode == "timing" else "perf",
-                  directory / "final.txt"]
+                  directory / "final.txt", args.solver]
 
         if mode == "timing":
             if run_logged(driver, directory, stdout="samples.csv"):
@@ -139,7 +239,8 @@ def collect(mode, binary, instance, directory, args):
                 durations = [float(row["seconds"]) for row in csv.DictReader(source)]
             if len(durations) != samples:
                 raise ValueError("Unexpected number of timing samples.")
-            summary = timing_summary(durations)
+            summary = {"solver": args.solver, "steps": args.steps, "dt": args.dt,
+                       **timing_summary(durations, args.steps)}
             write_csv(directory / "summary.csv", list(summary), [summary])
         elif mode == "profile":
             data = directory / "perf.data"
@@ -218,16 +319,22 @@ def experiment(args):
             try:
                 instance = folder / "input.txt"
                 shutil.copyfile(path, instance)
+                successful_modes = []
                 for mode in modes:
                     status, summary = collect(mode, binary, instance, folder / mode, args)
                     failed |= status["status"] != "ok"
+                    if status["status"] == "ok":
+                        successful_modes.append(mode)
                     if summary:
                         summaries.append({"instance": name, **summary})
+                if args.compare_direct:
+                    failed |= not compare_direct(binary, instance, folder, successful_modes, args)
             except OSError as error:
                 write_json(folder / "status.json", {"status": "failed", "error": str(error)})
                 failed = True
         if args.mode in ("timing", "all"):
-            fields = ["instance", "samples", "mean_seconds", "variance_seconds_squared", "stddev_seconds"]
+            fields = ["instance", "solver", "steps", "dt", "samples", "mean_seconds_per_step",
+                      "variance_seconds_per_step_squared", "stddev_seconds_per_step"]
             write_csv(directory / "timing-summary.csv", fields, summaries)
     except (OSError, ValueError, RuntimeError) as error:
         (directory / "error.txt").write_text(str(error) + "\n", encoding="utf-8")
@@ -235,6 +342,11 @@ def experiment(args):
     except KeyboardInterrupt:
         (directory / "error.txt").write_text("Interrupted by user.\n", encoding="utf-8")
         failed = True
+    for summary in summaries:
+        print("Timing {instance} [{solver}]: {mean:.6g} ± {stddev:.6g} ms/step "
+              "(mean ± sample SD; {steps} steps, {samples} samples)".format(
+                  **summary, mean=summary["mean_seconds_per_step"] * 1000,
+                  stddev=summary["stddev_seconds_per_step"] * 1000))
     print(f"Results: {directory} ({'failed' if failed else 'ok'})")
     return 1 if failed else 0
 
@@ -248,6 +360,9 @@ def parse_args(argv=None):
         sub.add_argument("--dt", type=float, required=True)
         sub.add_argument("--steps", type=int, required=True)
         sub.add_argument("--warmups", type=int, default=1)
+        sub.add_argument("--solver", choices=("direct", "approximate"), default="direct")
+        sub.add_argument("--compare-direct", action="store_true",
+                         help="compare final trajectory state with an unmeasured direct run")
         sub.add_argument("--results-dir", type=Path, default=ROOT / "results",
                          help="parent directory for automatically named experiments (default: results/)")
         if mode in ("timing", "all"):

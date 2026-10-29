@@ -21,11 +21,11 @@ class PlotResultsTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.results = Path(self.temp.name)
 
-    def save_run(self, name, samples, instance="0001-1000", status="ok"):
+    def save_run(self, name, samples, instance="0001-1000", status="ok", steps=1):
         timing = self.results / name / instance / "timing"
         timing.mkdir(parents=True)
         (timing.parent / "input.txt").write_text("1\n1 0 0 0 0 0 0 0 0 0\n")
-        (timing / "status.json").write_text(json.dumps({"status": status}))
+        (timing / "status.json").write_text(json.dumps({"status": status, "steps": steps}))
         (timing / "samples.csv").write_text("sample,seconds\n" + "".join(
             "{},{}\n".format(index, sample) for index, sample in enumerate(samples, 1)))
         return timing
@@ -38,6 +38,19 @@ class PlotResultsTests(unittest.TestCase):
         runs = plotter.load_results(self.results)["1000"]
         self.assertEqual([run.label for run in runs], ["+Baseline", "+Linking", "+Local_Sum"])
         self.assertEqual([run.samples for run in runs], [[4, 6], [2, 3, 4], [1, 2, 3, 4]])
+
+    def test_solver_labels_preserve_baseline_selection_and_optional_solver_metadata(self):
+        self.save_run("aaaaaaa_20261023-150000.000000Z_timing_+Earlier", [1, 2])
+        second = self.save_run("bbbbbbb_20261023-160000.000000Z_timing_+Baseline", [4, 8])
+        third = self.save_run("ccccccc_20261023-170000.000000Z_timing_+Changed", [2, 3])
+        (second / "status.json").write_text(json.dumps({"status": "ok", "steps": 1, "solver": "direct"}))
+        (third / "status.json").write_text(json.dumps({"status": "ok", "steps": 1, "solver": "approximate"}))
+        runs = plotter.load_results(self.results)["1000"]
+        self.assertEqual([run.label for run in runs],
+                         ["+Earlier", "+Baseline [direct]", "+Changed [approximate]"])
+        self.assertIs(plotter.choose_baseline(runs), runs[1])
+        self.assertIs(plotter.choose_baseline(runs, "+Baseline"), runs[1])
+        self.assertIs(plotter.choose_baseline(runs, "+Changed [approximate]"), runs[2])
 
     def test_baseline_selection_and_per_sample_speedup(self):
         self.save_run("aaaaaaa_20261023-150000.000000Z_timing_+Earlier", [1, 2])
@@ -54,6 +67,53 @@ class PlotResultsTests(unittest.TestCase):
         self.assertIs(plotter.choose_baseline(runs[:1]), runs[0])
         with self.assertRaisesRegex(ValueError, "matches 0 runs"):
             plotter.choose_baseline(runs, "+Missing")
+
+    def test_step_counts_normalize_samples_and_speedups(self):
+        self.save_run("aaaaaaa_20261023-150000.000000Z_timing_+Baseline", [2, 2], steps=10)
+        self.save_run("bbbbbbb_20261023-160000.000000Z_timing_+Longer", [20, 20], steps=100)
+        self.save_run("ccccccc_20261023-170000.000000Z_timing_+Faster", [10, 10], steps=100)
+        runs = plotter.load_results(self.results)["1000"]
+        self.assertEqual([run.samples for run in runs], [[0.2, 0.2], [0.2, 0.2], [0.1, 0.1]])
+        self.assertEqual(plotter.speedup_samples(runs, runs[0]), [[1, 1], [1, 1], [2, 2]])
+
+    def test_skips_legacy_results_without_changing_files(self):
+        self.save_run("aaaaaaa_20261023-160000.000000Z_timing", [1, 2], steps=10)
+        legacy = self.save_run("bbbbbbb_20261023-170000.000000Z_timing", [1, 2])
+        (legacy / "status.json").write_text(json.dumps({"status": "ok"}))
+        before = {path: path.read_bytes() for path in legacy.iterdir()}
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            runs = plotter.load_results(self.results)["1000"]
+        self.assertEqual(len(runs), 1)
+        self.assertIn("no recorded step count; cannot calculate time per step", errors.getvalue())
+        self.assertEqual(before, {path: path.read_bytes() for path in legacy.iterdir()})
+
+    def test_rejects_present_but_invalid_step_counts(self):
+        timing = self.save_run("aaaaaaa_20261023-160000.000000Z_timing", [1, 2])
+        for steps in (0, -1, 1.5, 2.0, "2", None, True):
+            (timing / "status.json").write_text(json.dumps({"status": "ok", "steps": steps}))
+            with self.subTest(steps=steps), self.assertRaisesRegex(ValueError, "positive integer step count"):
+                plotter.load_results(self.results)
+
+    def test_plot_displays_milliseconds_per_step_and_run_variation(self):
+        self.save_run("aaaaaaa_20261023-160000.000000Z_timing", [0.002, 0.004, 0.006], steps=2)
+        runs = plotter.load_results(self.results)["1000"]
+        plt = mock.MagicMock()
+        fig, ax = mock.MagicMock(), mock.MagicMock()
+        plt.subplots.return_value = fig, ax
+        plotter.draw_figure(plt, runs, [runs[0].samples], runs[0], self.results / "runtime.png")
+        ax.set_ylabel.assert_called_once_with("Time per step (ms)")
+        self.assertEqual(ax.scatter.call_args.args[1], [1, 2, 3])
+        self.assertEqual(ax.errorbar.call_args.args[1], [2])
+        self.assertEqual(ax.errorbar.call_args.kwargs["yerr"], [1])
+        self.assertIn("SD across runs", fig.text.call_args.args[2])
+        self.assertEqual(runs[0].samples, [0.001, 0.002, 0.003])  # Conversion is display-only.
+
+        ax.reset_mock()
+        ratios = plotter.speedup_samples(runs, runs[0])
+        plotter.draw_figure(plt, runs, ratios, runs[0], self.results / "speedup.png", speedup=True)
+        ax.set_ylabel.assert_called_once_with("Speedup (×)")
+        self.assertEqual(ax.scatter.call_args.args[1], ratios[0])
 
     def test_failed_runs_are_reported_and_inputs_are_kept_separate(self):
         name = "aaaaaaa_20261023-160000.000000Z_timing_+Baseline"
@@ -116,7 +176,7 @@ class PlotResultsTests(unittest.TestCase):
             runs = plotter.load_results(self.results)["1000"]
         self.assertEqual(len(runs), 1)
         self.assertIn("no timing status yet", errors.getvalue())
-        (unfinished / "status.json").write_text(json.dumps({"status": "ok"}))
+        (unfinished / "status.json").write_text(json.dumps({"status": "ok", "steps": 1}))
         (unfinished / "samples.csv").unlink()
         with self.assertRaisesRegex(ValueError, "samples.csv"):
             plotter.load_results(self.results)

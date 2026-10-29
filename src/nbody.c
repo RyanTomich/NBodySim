@@ -19,7 +19,8 @@ static void advance_state(size_t count, double dt,
     }
 }
 
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
+void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
+                          AccelerationSolver solver, void *context)
 {
     const size_t count = simulation->count;
     if (steps == 0 || count == 0) {
@@ -31,28 +32,8 @@ void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
                       simulation->ax, simulation->ay, simulation->az);
 
         const SimulationView state = simulation_view(simulation);
-        if (f == gravity) {
-            gravity_accelerations(&state, simulation->next_ax,
-                                  simulation->next_ay, simulation->next_az);
-        } else {
-            for (size_t i = 0; i < count; ++i) {
-                double ax = 0.0;
-                double ay = 0.0;
-                double az = 0.0;
-                for (size_t j = 0; j < count; ++j) {
-                    if (i == j) {
-                        continue;
-                    }
-                    Vec3 contribution = f(&state, i, j);
-                    ax += contribution.x;
-                    ay += contribution.y;
-                    az += contribution.z;
-                }
-                simulation->next_ax[i] = ax;
-                simulation->next_ay[i] = ay;
-                simulation->next_az[i] = az;
-            }
-        }
+        solver(&state, simulation->next_ax, simulation->next_ay,
+               simulation->next_az, context);
 
         /* Publish new accelerations only after every interaction has read state. */
         double *previous_ax = simulation->ax;
@@ -64,5 +45,35 @@ void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
         simulation->next_ax = previous_ax;
         simulation->next_ay = previous_ay;
         simulation->next_az = previous_az;
+    }
+}
+
+static void interaction_accelerations(const SimulationView *state, double *ax,
+                                     double *ay, double *az, void *context)
+{
+    Interaction f = *(const Interaction *)context;
+    for (size_t i = 0; i < state->count; ++i) {
+        double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
+        for (size_t j = 0; j < state->count; ++j) {
+            if (i == j) {
+                continue;
+            }
+            Vec3 contribution = f(state, i, j);
+            sum_x += contribution.x;
+            sum_y += contribution.y;
+            sum_z += contribution.z;
+        }
+        ax[i] = sum_x;
+        ay[i] = sum_y;
+        az[i] = sum_z;
+    }
+}
+
+void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
+{
+    if (f == gravity) {
+        simulate_with_solver(simulation, dt, steps, gravity_direct, NULL);
+    } else {
+        simulate_with_solver(simulation, dt, steps, interaction_accelerations, &f);
     }
 }
