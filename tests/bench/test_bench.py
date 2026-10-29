@@ -1,4 +1,4 @@
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 import csv
 from datetime import datetime, timezone
 import importlib.util
@@ -162,8 +162,58 @@ class BenchTests(unittest.TestCase):
                              (folder / "reference/final.txt").read_bytes())
             status = json.loads((folder / "timing/status.json").read_text())
             self.assertEqual(status["solver"], "approximate")
+            self.assertEqual(status["theta"], 0.5)
         with (experiment / "timing-summary.csv").open() as source:
-            self.assertTrue(all(row["solver"] == "approximate" for row in csv.DictReader(source)))
+            self.assertTrue(all(row["solver"] == "approximate" and float(row["theta"]) == 0.5
+                                for row in csv.DictReader(source)))
+
+    def test_theta_driver_and_recorded_settings(self):
+        args = self.args()
+        args.solver = "approximate"
+        args.theta = 0.0
+        instance = ROOT / "tests/data/1000.txt"
+        status, summary = benchmark.collect("timing", ROOT / "build/bench", instance,
+                                            self.directory / "full", args)
+        self.assertEqual(status["status"], "ok", status)
+        for key, value in benchmark.approximate_settings(instance, 0.0).items():
+            self.assertEqual(status[key], value)
+        totals = status["diagnostics"]
+        self.assertEqual(totals["scope"], "warmups_and_samples")
+        self.assertEqual(totals["calls"], (args.samples + args.warmups) * args.steps)
+        self.assertEqual(totals["accepted_nodes"], 0)
+        self.assertEqual(summary["theta"], 0)
+        # Actual forwarding: a looser theta accepts aggregates for this input.
+        args.theta = 0.8
+        status, _ = benchmark.collect("timing", ROOT / "build/bench", instance,
+                                      self.directory / "loose", args)
+        self.assertEqual(status["status"], "ok", status)
+        self.assertEqual(status["theta"], 0.8)
+        self.assertGreater(status["diagnostics"]["accepted_nodes"], 0)
+        with patch.object(benchmark, "perf_available", return_value="unavailable"):
+            status, _ = benchmark.collect("profile", ROOT / "build/bench", instance,
+                                          self.directory / "unavailable", args)
+        self.assertEqual(status["status"], "failed")
+        self.assertEqual(status["node_capacity"], 4000)
+        self.assertEqual(status["theta"], 0.8)
+        command = [str(ROOT / "build/bench"), str(self.instance), "0.01", "1", "2", "0",
+                   "timing", str(self.directory / "final.txt")]
+        # Historical internal-driver syntax continues to work.
+        self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
+        for solver, theta in (("direct", "0"), ("approximate", "nan"),
+                              ("approximate", "-1"), ("approximate", "inf")):
+            self.assertNotEqual(subprocess.run(command + [solver, theta],
+                                               capture_output=True).returncode, 0)
+
+    def test_theta_cli_validation(self):
+        command = ["timing", str(self.instance), "--dt", "0.01", "--steps", "2"]
+        self.assertIsNone(benchmark.parse_args(command).theta)
+        self.assertEqual(benchmark.parse_args(command + ["--solver", "approximate"]).theta, 0.5)
+        self.assertEqual(benchmark.parse_args(command + ["--solver", "approximate", "--theta", "0"]).theta, 0)
+        for options in (["--theta", "0"], ["--solver", "direct", "--theta", "0.5"],
+                        *[["--solver", "approximate", "--theta", value]
+                          for value in ("-1", "nan", "inf", "bad")]):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                benchmark.parse_args(command + options)
 
     def test_statistics(self):
         summary = benchmark.timing_summary([2.0, 4.0, 6.0], 2)

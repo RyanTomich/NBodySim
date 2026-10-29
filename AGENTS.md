@@ -2,11 +2,13 @@
 
 ## Project Structure & Module Organization
 
-This is a serial C17 3D N-body simulator with O(n²) work per step.
+This is a serial C17 3D N-body simulator with direct O(n²) gravity and a
+Barnes–Hut approximate solver.
 
 - `src/nbody.h` and `src/nbody.c` define array state types and simulation logic;
   `src/state.c` allocates their storage and constructs read-only views.
-- `src/gravity.*` implements gravity; `src/io.*` handles instance files.
+- `src/gravity.*` implements direct gravity; `src/io.*` handles instance files.
+- `src/approximate.*` owns the bounded octree, aggregation, traversal, and reusable workspace.
 - `src/main.c` parses CLI arguments and selects the interaction callback.
 - `tests/test_main.c` contains unit tests; `tests/test_cli.sh` checks CLI behavior.
 - `bench/` contains the separate measurement driver and Python runner;
@@ -27,7 +29,10 @@ make clean           # Remove build/; preserve results/
 ./build/app tests/data/two_body.txt 0.01 100 > build/final.txt
 ```
 
-The application accepts `INPUT DT STEPS` and writes the final state to stdout.
+The application accepts `[--solver direct|approximate] [--theta VALUE] INPUT DT STEPS`
+and writes the final state to stdout. Theta defaults to 0.5 for approximate runs;
+explicit theta requires the approximate solver and must be finite and nonnegative.
+The benchmark runner accepts the same solver/theta options.
 Use a different output filename from the input. Override compiler settings with
 commands such as `make CC=clang`; clean before changing compiler flags.
 All targets use `-O3 -g -fno-omit-frame-pointer`, with fast-math disabled and
@@ -71,9 +76,10 @@ call. Use `--results-dir PATH` to change the parent directory.
 
 Measure the entire simulation call. Keep `samples.csv` as raw whole-run seconds;
 normalize each sample by `--steps` only for summaries and plotting (never by
-`dt`). Summary CSVs record solver, steps, dt, samples, `mean_seconds_per_step`,
+`dt`). Summary CSVs record solver, theta (blank for direct), steps, dt, samples, `mean_seconds_per_step`,
 `variance_seconds_per_step_squared`, and `stddev_seconds_per_step`. Each mode's
-`status.json` records steps and dt. Terminal output and runtime plots use ms/step;
+`status.json` records steps and dt. Approximate runs also record effective tree
+settings and available diagnostics, whose totals span warmups and samples. Terminal output and runtime plots use ms/step;
 standard deviations describe variation across whole-run averages, not individual
 steps. The plotter skips older runs without recorded step counts with an
 explanation; preserve those files unchanged.

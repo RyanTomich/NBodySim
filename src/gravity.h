@@ -19,8 +19,11 @@ Vec3 gravity(const SimulationView *state, size_t target, size_t source);
 void gravity_accelerations(const SimulationView *state, double *restrict ax,
                            double *restrict ay, double *restrict az);
 
-/* Whole-system solvers; context is unused and may be NULL. The approximate
- * solver is currently an exact placeholder delegating to the direct kernel.
+/* Whole-system solvers. Direct ignores context. Approximate requires a prepared
+ * ApproximateWorkspace (approximate.h) matching state->count for nonempty calls.
+ * It rebuilds a bounded octree, aggregates mass, and traverses for each target.
+ * Unrepresentable bounds or aggregates fall back to direct gravity.
+ * No allocation occurs in either callback. Empty approximate calls allow NULL.
  */
 void gravity_direct(const SimulationView *state, double *ax, double *ay,
                     double *az, void *context);

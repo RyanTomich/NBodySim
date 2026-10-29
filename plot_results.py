@@ -38,10 +38,19 @@ def run_details(run):
     return run.name, run.name.rsplit("_", 1)[-1]
 
 
-def load_results(results_dir):
+def load_results(results_dir, selected_runs=None):
     """Normalize each raw duration by its run's step count; keep runs separate."""
     groups = {}
-    for directory in sorted(results_dir.glob("*/*/timing")):
+    if selected_runs is None:
+        directories = sorted(results_dir.glob("*/*/timing"))
+    else:
+        available = {run.name: run for run in results_dir.iterdir() if run.is_dir()}
+        missing = set(selected_runs) - available.keys()
+        if missing:
+            raise ValueError("Unknown run(s) in {}: {}".format(results_dir, ", ".join(sorted(missing))))
+        directories = sorted(directory for name in set(selected_runs)
+                             for directory in available[name].glob("*/timing"))
+    for directory in directories:
         if not (directory / "status.json").exists():
             print("Skipping {}: no timing status yet".format(directory), file=sys.stderr)
             continue
@@ -71,7 +80,10 @@ def load_results(results_dir):
         _, label = run_details(run)
         instance = re.sub(r"^\d+-", "", directory.parent.name)
         if status.get("solver"):
-            label += " [" + status["solver"] + "]"
+            settings = status["solver"]
+            if status.get("theta") is not None:
+                settings += " theta={:g}".format(status["theta"])
+            label += " [" + settings + "]"
         timing = Timing(run, label, instance, samples, directory.parent / "input.txt")
         groups.setdefault(instance, []).append(timing)
 
@@ -136,7 +148,7 @@ def draw_figure(plt, runs, observations, baseline, output, speedup=False):
     ax.set_xticklabels(labels, fontsize=9)
     ax.set_ylabel("Speedup (×)" if speedup else "Time per step (ms)")
     title = "Speedup vs {}".format(baseline.label) if speedup else "Time per simulation step"
-    title = textwrap.fill(title, width=int(width * 10))
+    title = textwrap.fill(title.replace("_", " "), width=int(width * 7))
     ax.set_title("{}\nInput {}".format(title, runs[0].instance), loc="left", pad=12)
     ax.set_xlim(-0.5, len(runs) - 0.5)
     ax.margins(y=0.12)
@@ -163,11 +175,14 @@ def main(argv=None):
                         help="saved benchmark runs (default: results/ beside this script)")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "plots",
                         help="image directory (default: plots/ beside this script)")
+    parser.add_argument("--runs", nargs="+", metavar="RUN",
+                        help="plot only these exact run directory names under --results-dir; "
+                        "default: all runs")
     parser.add_argument("--baseline", help="baseline label or full run directory name; "
                         "defaults to +Baseline, then the earliest run for each input")
     args = parser.parse_args(argv)
     try:
-        groups = load_results(args.results_dir)
+        groups = load_results(args.results_dir, args.runs)
         baselines = [choose_baseline(runs, args.baseline) for runs in groups.values()]
         speedups = [speedup_samples(runs, baseline)
                     for runs, baseline in zip(groups.values(), baselines)]

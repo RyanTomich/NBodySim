@@ -1,6 +1,7 @@
 /* Test double: confirms warmups are ungated and every call sees initial state. */
 #include "nbody.h"
 #include "gravity.h"
+#include "approximate.h"
 #include <string.h>
 #include "perf_gate.h"
 
@@ -23,7 +24,16 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
                           AccelerationSolver solver, void *context)
 {
     (void)dt;
-    assert(context == NULL);
+    if (solver == gravity_approximate) {
+        ApproximateWorkspace *workspace = context;
+        assert(workspace && workspace->count == simulation->count && workspace->nodes);
+        /* The same allocated pool must survive all warmups and samples. */
+        static OctreeNode *nodes;
+        assert(!nodes || nodes == workspace->nodes);
+        nodes = workspace->nodes;
+    } else {
+        assert(context == NULL);
+    }
     const char *expected = getenv("BENCH_TEST_SOLVER");
     assert(solver == gravity_solver_by_name(expected ? expected : "direct"));
     assert(simulation->count == 1);

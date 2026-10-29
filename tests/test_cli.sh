@@ -55,4 +55,18 @@ expect_failure tests/data/two_body.txt 0.01 1 --solver
 expect_failure tests/data/two_body.txt 0.01 1 --solver unknown
 expect_failure --solver direct tests/data/two_body.txt 0.01 1 --solver approximate
 
+# Theta is valid only for approximate runs, including full opening at zero.
+for theta in 0 0.25 1; do
+    ./build/app --theta "$theta" tests/data/two_body.txt 0.01 2 --solver approximate > build/cli-output.txt
+    ./build/app --solver approximate --theta "$theta" tests/data/two_body.txt 0.01 2 > build/cli-default.txt
+    cmp build/cli-default.txt build/cli-output.txt
+done
+for theta in -1 nan inf 1e999 bad ''; do
+    expect_failure --solver approximate --theta "$theta" tests/data/two_body.txt 0.01 1
+done
+expect_failure --theta 0.5 tests/data/two_body.txt 0.01 1
+expect_failure --solver direct --theta 0 tests/data/two_body.txt 0.01 1
+expect_failure --solver approximate tests/data/two_body.txt 0.01 1 --theta
+expect_failure --solver approximate --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
+
 printf 'All CLI tests passed.\n'

@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gravity.h"
+#include "approximate.h"
 #include "io.h"
 #include "perf_gate.h"
 
@@ -54,15 +55,18 @@ int main(int argc, char **argv)
 {
     double dt;
     size_t steps, samples, warmups;
-    if (argc != 8 && argc != 9) {
-        fprintf(stderr, "Usage: %s INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate]\n", argv[0]);
+    if (argc < 8 || argc > 10) {
+        fprintf(stderr, "Usage: %s INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate [THETA]]\n", argv[0]);
         return EXIT_FAILURE;
     }
     bool timing = strcmp(argv[6], "timing") == 0;
     bool perf = strcmp(argv[6], "perf") == 0;
     bool reference = strcmp(argv[6], "reference") == 0;
-    AccelerationSolver solver = gravity_solver_by_name(argc == 9 ? argv[8] : "direct");
-    if ((!timing && !perf && !reference) || !solver
+    AccelerationSolver solver = gravity_solver_by_name(argc >= 9 ? argv[8] : "direct");
+    ApproximateConfig config = approximate_default_config();
+    if ((argc == 10 && (solver != gravity_approximate
+                       || !parse_double(argv[9], &config.theta) || config.theta < 0.0))
+        || (!timing && !perf && !reference) || !solver
         || !parse_double(argv[2], &dt) || dt <= 0.0
         || !parse_size(argv[3], &steps) || steps == 0
         || !parse_size(argv[4], &samples) || samples == 0
@@ -89,6 +93,8 @@ int main(int argc, char **argv)
     }
 
     int result = EXIT_FAILURE;
+    ApproximateWorkspace workspace = {0};
+    void *context = NULL;
     Simulation simulation;
     bool allocated = simulation_create(&simulation, initial.count);
     double *durations = malloc(samples * sizeof(*durations));
@@ -97,9 +103,23 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    if (solver == gravity_approximate) {
+        if (!approximate_workspace_create(&workspace, initial.count,
+                                          config)) {
+            fprintf(stderr, "Could not allocate approximate workspace.\n");
+            goto cleanup;
+        }
+        context = &workspace;
+    }
+
+    if (context) {
+        fprintf(stderr, "approximate_config: {\"theta\": %.17g, \"bucket_capacity\": %zu, "
+                "\"max_depth\": %zu, \"node_capacity\": %zu}\n",
+                config.theta, config.bucket_capacity, config.max_depth, workspace.node_capacity);
+    }
     for (size_t i = 0; i < warmups; ++i) {
         reset_state(&simulation, &initial);
-        simulate_with_solver(&simulation, dt, steps, solver, NULL);
+        simulate_with_solver(&simulation, dt, steps, solver, context);
         if (!finite_state(&simulation)) {
             fprintf(stderr, "Warmup produced a nonfinite state.\n");
             goto cleanup;
@@ -119,7 +139,7 @@ int main(int argc, char **argv)
             goto cleanup;
         }
 
-        simulate_with_solver(&simulation, dt, steps, solver, NULL);
+        simulate_with_solver(&simulation, dt, steps, solver, context);
 
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
@@ -162,6 +182,16 @@ int main(int argc, char **argv)
     result = EXIT_SUCCESS;
 
 cleanup:
+    if (context) {
+        const ApproximateTotals *totals = &workspace.totals;
+        fprintf(stderr, "approximate_totals: {\"scope\": \"warmups_and_samples\", "
+                "\"calls\": %zu, \"capacity_limited_leaves\": %zu, "
+                "\"bounds_fallbacks\": %zu, \"aggregate_fallbacks\": %zu, "
+                "\"accepted_nodes\": %zu}\n", totals->calls,
+                totals->capacity_limited_leaves, totals->bounds_fallbacks,
+                totals->aggregate_fallbacks, totals->accepted_nodes);
+    }
+    approximate_workspace_destroy(&workspace);
     free(durations);
     free(simulation.storage);
     free(initial.storage);

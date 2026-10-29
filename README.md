@@ -12,19 +12,24 @@ make
 make test
 ```
 
-The command is `./build/app [--solver direct|approximate] INPUT DT STEPS`.
+The command is `./build/app [--solver direct|approximate] [--theta VALUE] INPUT DT STEPS`.
 `DT` must be positive and finite;
 `STEPS` must be a nonnegative integer. The final state goes to stdout. Errors go
 to stderr and return a nonzero exit status. Zero steps returns the input state
 unchanged, although numeric formatting may change.
 
-The default solver is `direct`. `approximate` is currently an **exact O(n²)
-placeholder** that delegates to the direct kernel; its body in `src/approximate.c`
-is the replacement point for a future approximation. Both solvers are compiled
-into the same executable and share the Euler loop and instance format.
+The default solver is `direct`. `approximate` uses a serial Barnes–Hut octree:
+rebuild the tree, aggregate masses and centers of mass, then traverse for each
+particle. Both solvers share the Euler loop and instance format. The default
+opening parameter is theta = 0.5. Set `--theta` to any finite nonnegative value
+with `--solver approximate`; theta zero fully opens the tree. Supplying theta
+with the direct solver is an error. Other tree settings remain configurable
+through `ApproximateConfig` in C. Typical
+work is approximately O(n log n), but unfavorable distributions or full opening
+can approach O(n²).
 
 ```sh
-./build/app --solver approximate tests/data/two_body.txt 0.01 100 > build/final-approximate.txt
+./build/app --solver approximate --theta 0.5 tests/data/two_body.txt 0.01 100 > build/final-approximate.txt
 ```
 
 ## Instance format
@@ -283,25 +288,38 @@ results and explicit unsupported-platform statuses for Linux-only modes.
 
 ### Select a solver and evaluate error
 
-Every runner mode accepts `--solver direct|approximate` (default `direct`) and
-optional `--compare-direct`:
+Every runner mode accepts `--solver direct|approximate` (default `direct`),
+`--theta` for approximate runs (default 0.5), and optional `--compare-direct`:
 
 ```sh
 python3 bench/run.py timing tests/data/two_body.txt --dt 0.0001 --steps 100 \
-  --samples 30 --solver approximate --compare-direct
+  --samples 30 --solver approximate --theta 0.5 --compare-direct
 ```
 
 Solver selection applies to warmups and measured calls. Each mode's `status.json`,
 `timing/summary.csv`, and the aggregate `timing-summary.csv` identify the selected
-solver. The generator, input files, and timing sample format stay the same.
+solver. Approximate mode status records effective `theta`, `bucket_capacity`,
+`max_depth`, and `node_capacity`, including modes unavailable on the host.
+Timing summaries include theta (blank for direct runs); plot and terminal labels
+include it when present. Older results without theta remain readable unchanged.
+The generator, input files, and raw timing sample format stay the same.
+
+The driver writes `approximate_config` and `approximate_totals` JSON lines to
+`stderr.log` outside measured intervals. The runner copies totals into the mode
+status's `diagnostics` field. Their scope is explicitly `warmups_and_samples`:
+`calls`, capacity-limited leaf counts, bounds/aggregate fallback counts, and
+accepted-node counts accumulate across every completed solver call. Failed modes
+retain available diagnostics; unsupported modes have no measured diagnostics.
 
 With `--compare-direct`, the runner executes one additional direct trajectory per
 input after all measurement modes finish, starting from the archived input with
 identical `dt` and `steps`. The archived benchmark executable runs this reference
 without timers, warmups, or perf gates. Reference work and Python error evaluation
 are outside every measured interval. The internal driver CLI is
-`INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate]`;
-`reference` requires one sample, zero warmups, and the direct solver.
+`INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate [THETA]]`;
+Omitting solver or theta preserves the original defaults. An explicit theta is
+valid only with the approximate solver. `reference` requires one sample, zero
+warmups, and the direct solver.
 
 Each input gains `reference/final.txt`, `reference/status.json`, and process logs.
 Each successful measurement mode gains `error.csv` and `error-status.json`.
@@ -324,7 +342,8 @@ imposed. Without `--compare-direct`, there is no reference run or evaluation out
 These metrics measure **final trajectory differences**, including accumulated
 drift. Final accelerations may be evaluated at different positions once the
 approximate solver changes; they do not isolate force error on identical positions.
-While the placeholder uses the direct kernel, all reported errors should be zero.
+Barnes–Hut errors depend on the opening parameter and particle distribution;
+zero trajectory error is not expected in general.
 
 ### Plot saved timings
 
@@ -343,7 +362,7 @@ two images per test instance: `plots/raw_time_<instance>.png` and
 produce four images, each accumulating all successful runs for that input.
 Labels use the suffix after the run
 type: `c7a9d7e_20261023-160502.425884Z_timing_+Linking` becomes `+Linking`.
-New runs append the solver to the label, such as `+Linking [approximate]`; older
+New runs append the solver to the label, such as `+Linking [approximate theta=0.5]`; older
 results without solver metadata retain their labels. Runs appear in chronological
 order. Each input gets its own baseline and axes;
 failed or unfinished timing runs are skipped with a message. Historical runs
@@ -351,6 +370,19 @@ without `steps` in their timing status are also skipped with an explanation;
 step counts cannot be inferred from saved durations. Present but invalid step
 counts are errors. No historical results are modified. Compact figures
 wrap long labels to avoid excessive spacing between results.
+
+To compare only specific runs, pass their exact directory names with `--runs`.
+Selection happens before loading timings, so unrelated runs are not read. Duplicate
+names are ignored; unknown names are errors. The usual chronological order and
+input-matching checks still apply. The baseline must be among the selected runs.
+Use a separate output directory to retain other plots:
+
+```sh
+build/plot-venv/bin/python plot_results.py \
+  --runs cf3be1a_20261029-233126.502386Z_timing cf3be1a_20261029-233212.934159Z_timing \
+  --baseline cf3be1a_20261029-233126.502386Z_timing \
+  --output-dir plots/exact-vs-approximate
+```
 
 Time plots use milliseconds per simulation step (`Time per step (ms)`), while
 retaining the `raw_time_<instance>.png` filenames. Every run's average per step
@@ -394,12 +426,33 @@ void simulate(Simulation *simulation, double dt, size_t steps, Interaction f);
 whole-system solver with read-only state and three disjoint output arrays. The
 solver must fill every output without modifying state or allocating. The caller
 owns `context` and any workspace it points to; prepare that workspace before
-simulation and reuse it between steps. Both supplied gravity solvers accept NULL
-context. Zero bodies or zero steps makes no solver call.
+simulation and reuse it between steps. Direct gravity accepts NULL context.
+Approximate gravity requires a prepared
+`ApproximateWorkspace` from `src/approximate.h` for nonempty states. The application
+and benchmark driver allocate it before simulation and release it afterward.
+Each approximate call rebuilds a bounded octree without allocation, accumulates
+mass and center of mass from leaves upward, and traverses it for every target.
+Default tree settings are theta 0.5, bucket capacity 8, maximum depth 32, and
+a node pool of `max(1, 4 * count)`. Depth, capacity, and floating-point subdivision
+limits retain larger leaf buckets. Unrepresentable root bounds or aggregate
+mass/centers select direct fallback. Workspace diagnostics report capacity-limited
+leaves, bounds/aggregate fallback, and accepted-node counts for the latest call.
+`workspace.totals` accumulates across calls until creation/destruction or an
+explicit caller reset to `(ApproximateTotals){0}`.
+Zero bodies or zero steps makes no solver call.
+
+A node containing the target is always opened. Other internal nodes are accepted
+only when full cube width divided by center-of-mass distance is less than theta;
+zero-distance nodes are opened. Leaves evaluate particles directly, skipping the
+target by index. Theta zero opens every internal node and agrees with direct
+summation within rounding error. Independent target traversals do not exactly
+preserve pairwise force symmetry. Smaller theta generally improves accuracy at
+higher cost; errors need not decrease monotonically for each particle.
 
 `gravity_solver_by_name` resolves `direct` and `approximate` to separate callbacks;
 unknown names return NULL. `gravity_direct` wraps the existing optimized O(n²)
-kernel. `gravity_approximate` currently calls that same implementation.
+kernel. `gravity_approximate` implements Barnes–Hut with direct fallback for
+unrepresentable tree bounds or aggregates.
 The original `simulate(..., Interaction)` remains a compatibility wrapper: gravity
 uses the direct callback, and other interactions use the original ordered-pair
 calculation through an adapter. Both paths share the same integration loop.
@@ -517,7 +570,7 @@ detect numerical overflow during evolution.
 - `src/nbody.h` and `src/nbody.c`: array types, callback, and serial simulation.
 - `src/state.c`: one-time allocation and read-only array views.
 - `src/gravity.h` and `src/gravity.c`: gravitational interaction, direct kernel, and solver lookup.
-- `src/approximate.c`: replaceable approximate solver (currently exact).
+- `src/approximate.c`, `src/approximate.h`: Barnes–Hut solver and workspace lifecycle.
 - `src/io.h` and `src/io.c`: text input/output and numeric parsing.
 - `src/main.c`: command-line arguments and selection of the gravity callback.
 - `bench/`: separate measurement driver, Linux event gate, and Python runner.

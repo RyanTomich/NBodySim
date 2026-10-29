@@ -52,6 +52,18 @@ class PlotResultsTests(unittest.TestCase):
         self.assertIs(plotter.choose_baseline(runs, "+Baseline"), runs[1])
         self.assertIs(plotter.choose_baseline(runs, "+Changed [approximate]"), runs[2])
 
+    def test_theta_labels_include_zero_and_preserve_older_results(self):
+        for index, theta in enumerate((None, 0.0, 0.5)):
+            directory = self.save_run(f"aaaaaaa_20261023-15000{index}.000000Z_timing", [1, 2])
+            status = {"status": "ok", "steps": 1, "solver": "approximate"}
+            if theta is not None:
+                status["theta"] = theta
+            (directory / "status.json").write_text(json.dumps(status))
+        runs = plotter.load_results(self.results)["1000"]
+        self.assertTrue(runs[0].label.endswith("[approximate]"))
+        self.assertTrue(runs[1].label.endswith("[approximate theta=0]"))
+        self.assertTrue(runs[2].label.endswith("[approximate theta=0.5]"))
+
     def test_baseline_selection_and_per_sample_speedup(self):
         self.save_run("aaaaaaa_20261023-150000.000000Z_timing_+Earlier", [1, 2])
         self.save_run("bbbbbbb_20261023-160000.000000Z_timing_+Baseline", [4, 8])
@@ -166,6 +178,33 @@ class PlotResultsTests(unittest.TestCase):
                 self.assertEqual(call.kwargs["speedup"], kind == "speedup")
                 self.assertEqual(path.parent, output)
                 self.assertIn("Saved {}".format(path), messages.getvalue())
+
+    def test_selected_runs_exclude_unrelated_corrupt_results(self):
+        first = "aaaaaaa_20261023-160000.000000Z_timing_+Exact"
+        second = "bbbbbbb_20261023-170000.000000Z_timing_+Approximate"
+        self.save_run(first, [4, 6])
+        self.save_run(second, [2, 3])
+        corrupt = self.save_run("ccccccc_20261023-180000.000000Z_timing", [1, 2])
+        (corrupt / "samples.csv").write_text("invalid")
+        runs = plotter.load_results(self.results, [second, first, first])["1000"]
+        self.assertEqual([run.run.name for run in runs], [first, second])
+        with self.assertRaisesRegex(ValueError, "Unknown run"):
+            plotter.load_results(self.results, [first, "typo"])
+        with self.assertRaisesRegex(ValueError, "matches 0 runs"):
+            plotter.choose_baseline(runs, corrupt.parent.parent.name)
+
+        matplotlib = mock.MagicMock()
+        with mock.patch.dict("sys.modules", {
+                "matplotlib": matplotlib, "matplotlib.pyplot": matplotlib.pyplot}), \
+                mock.patch.object(plotter, "draw_figure") as draw, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(plotter.main([
+                "--results-dir", str(self.results), "--output-dir", str(self.results / "plots"),
+                "--runs", second, first, "--baseline", first]), 0)
+        self.assertEqual(draw.call_count, 2)
+        for call in draw.call_args_list:
+            self.assertEqual([run.run.name for run in call.args[1]], [first, second])
+            self.assertEqual(call.args[3].run.name, first)
 
     def test_unfinished_runs_are_skipped_but_successful_runs_require_samples(self):
         self.save_run("aaaaaaa_20261023-160000.000000Z_timing_+Baseline", [2, 4])

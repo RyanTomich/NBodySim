@@ -217,12 +217,41 @@ def perf_available():
     return None
 
 
+def approximate_settings(instance, theta):
+    # Defaults shared with approximate_default_config; driver logs the actual
+    # configuration too. Record these even when perf cannot run on this host.
+    with instance.open() as source:
+        first = next((line.split()[0] for line in source if line.split()), "")
+    count = int(first)
+    if count < 0:
+        raise ValueError("Invalid body count")
+    return {"theta": theta, "bucket_capacity": 8, "max_depth": 32,
+            "node_capacity": max(1, 4 * count)}
+
+
+def driver_metadata(directory, status):
+    path = directory / "stderr.log"
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if line.startswith("approximate_config: "):
+                status.update(json.loads(line.split(": ", 1)[1]))
+            elif line.startswith("approximate_totals: "):
+                status["diagnostics"] = json.loads(line.split(": ", 1)[1])
+
+
 def collect(mode, binary, instance, directory, args):
     directory.mkdir()
     status = {"mode": mode, "solver": args.solver, "steps": args.steps, "dt": args.dt,
               "started": now(), "status": "failed"}
     summary = None
+    theta = getattr(args, "theta", None)
+    if args.solver == "approximate" and theta is None:
+        theta = 0.5
+    if args.solver == "approximate":
+        status["theta"] = theta
     try:
+        if args.solver == "approximate":
+            status.update(approximate_settings(instance, theta))
         if mode != "timing":
             unavailable = perf_available()
             if unavailable:
@@ -231,6 +260,8 @@ def collect(mode, binary, instance, directory, args):
         driver = [binary, instance, str(args.dt), str(args.steps), str(samples),
                   str(args.warmups), "timing" if mode == "timing" else "perf",
                   directory / "final.txt", args.solver]
+        if args.solver == "approximate":
+            driver.append(str(theta))
 
         if mode == "timing":
             if run_logged(driver, directory, stdout="samples.csv"):
@@ -239,7 +270,7 @@ def collect(mode, binary, instance, directory, args):
                 durations = [float(row["seconds"]) for row in csv.DictReader(source)]
             if len(durations) != samples:
                 raise ValueError("Unexpected number of timing samples.")
-            summary = {"solver": args.solver, "steps": args.steps, "dt": args.dt,
+            summary = {"solver": args.solver, "theta": theta, "steps": args.steps, "dt": args.dt,
                        **timing_summary(durations, args.steps)}
             write_csv(directory / "summary.csv", list(summary), [summary])
         elif mode == "profile":
@@ -274,6 +305,11 @@ def collect(mode, binary, instance, directory, args):
         status["status"] = "ok"
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         status["error"] = str(error)
+        summary = None
+    try:
+        driver_metadata(directory, status)
+    except (OSError, ValueError) as error:
+        status.update(status="failed", error="Invalid driver metadata: " + str(error))
         summary = None
     status["finished"] = now()
     write_json(directory / "status.json", status)
@@ -333,7 +369,7 @@ def experiment(args):
                 write_json(folder / "status.json", {"status": "failed", "error": str(error)})
                 failed = True
         if args.mode in ("timing", "all"):
-            fields = ["instance", "solver", "steps", "dt", "samples", "mean_seconds_per_step",
+            fields = ["instance", "solver", "theta", "steps", "dt", "samples", "mean_seconds_per_step",
                       "variance_seconds_per_step_squared", "stddev_seconds_per_step"]
             write_csv(directory / "timing-summary.csv", fields, summaries)
     except (OSError, ValueError, RuntimeError) as error:
@@ -343,9 +379,11 @@ def experiment(args):
         (directory / "error.txt").write_text("Interrupted by user.\n", encoding="utf-8")
         failed = True
     for summary in summaries:
-        print("Timing {instance} [{solver}]: {mean:.6g} ± {stddev:.6g} ms/step "
+        print("Timing {instance} [{solver}{theta_label}]: {mean:.6g} ± {stddev:.6g} ms/step "
               "(mean ± sample SD; {steps} steps, {samples} samples)".format(
-                  **summary, mean=summary["mean_seconds_per_step"] * 1000,
+                  **summary, theta_label=(" theta={:g}".format(summary["theta"])
+                                          if summary["theta"] is not None else ""),
+                  mean=summary["mean_seconds_per_step"] * 1000,
                   stddev=summary["stddev_seconds_per_step"] * 1000))
     print(f"Results: {directory} ({'failed' if failed else 'ok'})")
     return 1 if failed else 0
@@ -361,6 +399,7 @@ def parse_args(argv=None):
         sub.add_argument("--steps", type=int, required=True)
         sub.add_argument("--warmups", type=int, default=1)
         sub.add_argument("--solver", choices=("direct", "approximate"), default="direct")
+        sub.add_argument("--theta", type=float, help="Barnes–Hut opening parameter (default: 0.5)")
         sub.add_argument("--compare-direct", action="store_true",
                          help="compare final trajectory state with an unmeasured direct run")
         sub.add_argument("--results-dir", type=Path, default=ROOT / "results",
@@ -374,6 +413,13 @@ def parse_args(argv=None):
         else:
             sub.set_defaults(events=DEFAULT_EVENTS)
     args = parser.parse_args(argv)
+    if args.theta is not None:
+        if args.solver != "approximate":
+            parser.error("--theta requires --solver approximate")
+        if not math.isfinite(args.theta) or args.theta < 0:
+            parser.error("--theta must be finite and nonnegative")
+    elif args.solver == "approximate":
+        args.theta = 0.5
     if not math.isfinite(args.dt) or args.dt <= 0 or args.steps <= 0 or args.warmups < 0:
         parser.error("dt and steps must be positive, dt finite, and warmups nonnegative")
     if args.mode in ("timing", "all") and args.samples < 2:

@@ -1,8 +1,10 @@
 #include "gravity.h"
+#include "approximate.h"
 #include "io.h"
 #include "nbody.h"
 
 #include <assert.h>
+#include <float.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -743,6 +745,216 @@ static void test_invalid_input(void)
     assert(fclose(file) == 0);
 }
 
+static void check_tree(const SimulationView *state, const ApproximateWorkspace *workspace)
+{
+    size_t leaves = 0;
+    assert(workspace->node_count <= workspace->node_capacity);
+    for (size_t n = 0; n < workspace->node_count; ++n) {
+        const OctreeNode *node = &workspace->nodes[n];
+        size_t next = node->begin;
+        bool internal = false;
+        for (size_t c = 0; c < 8; ++c) {
+            if (node->children[c] != SIZE_MAX) {
+                internal = true;
+                assert(node->children[c] > n && node->children[c] < workspace->node_count);
+                const OctreeNode *child = &workspace->nodes[node->children[c]];
+                assert(child->begin == next && child->end > child->begin);
+                next = child->end;
+            }
+        }
+        if (internal) {
+            assert(next == node->end);
+        } else {
+            leaves += node->end - node->begin;
+        }
+        for (size_t p = node->begin; p < node->end; ++p) {
+            size_t i = workspace->indices[p];
+            assert(i < state->count && workspace->rank[i] == p);
+            assert(fabs(state->x[i] - node->center.x) <= node->half_width);
+            assert(fabs(state->y[i] - node->center.y) <= node->half_width);
+            assert(fabs(state->z[i] - node->center.z) <= node->half_width);
+        }
+    }
+    assert(leaves == state->count);
+}
+
+static void test_octree_build_and_rebuild(void)
+{
+    Simulation simulation;
+    assert(simulation_create(&simulation, 27));
+    for (size_t i = 0; i < simulation.count; ++i) {
+        simulation.w[i] = 1.0;
+        simulation.x[i] = (double)(i % 3) - 1.0;
+        simulation.y[i] = (double)((i / 3) % 3) - 1.0;
+        simulation.z[i] = (double)(i / 9) - 1.0;
+    }
+    SimulationView state = simulation_view(&simulation);
+    ApproximateConfig config = approximate_default_config();
+    config.bucket_capacity = 1;
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, state.count, config));
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.node_count > 1 && !workspace.bounds_fallback);
+    check_tree(&state, &workspace);
+    /* Rebuild a coincident cloud at a different location using the same pool. */
+    OctreeNode *pool = workspace.nodes;
+    for (size_t i = 0; i < state.count; ++i) {
+        simulation.x[i] = simulation.y[i] = simulation.z[i] = 100.0;
+    }
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.nodes == pool && workspace.nodes[0].center.x == 100.0);
+    check_tree(&state, &workspace);
+    for (size_t i = 0; i < state.count; ++i) {
+        assert(simulation.next_ax[i] == 0.0 && simulation.next_ay[i] == 0.0
+               && simulation.next_az[i] == 0.0);
+    }
+    /* Unrepresentable full width selects direct fallback and clears old nodes. */
+    simulation.x[0] = -DBL_MAX;
+    simulation.x[1] = DBL_MAX;
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.bounds_fallback && workspace.node_count == 0);
+    approximate_workspace_destroy(&workspace);
+    for (size_t i = 0; i < state.count; ++i) {
+        simulation.x[i] = (double)i;
+    }
+    config.node_capacity = 1;
+    assert(approximate_workspace_create(&workspace, state.count, config));
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.node_count == 1 && workspace.capacity_limited_leaves == 1);
+    check_tree(&state, &workspace);
+    approximate_workspace_destroy(&workspace);
+    config.max_depth = 0;
+    assert(approximate_workspace_create(&workspace, state.count, config));
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.node_count == 1 && workspace.capacity_limited_leaves == 0);
+    check_tree(&state, &workspace);
+    approximate_workspace_destroy(&workspace);
+    free(simulation.storage);
+
+    config = approximate_default_config();
+    assert(approximate_workspace_create(&workspace, 0, config));
+    SimulationView empty = {0};
+    gravity_approximate(&empty, NULL, NULL, NULL, &workspace);
+    assert(workspace.node_count == 0 && !workspace.bounds_fallback);
+    approximate_workspace_destroy(&workspace);
+    approximate_workspace_destroy(&workspace);
+    assert(!approximate_workspace_create(&workspace, SIZE_MAX, config));
+    config.max_depth = APPROXIMATE_MAX_DEPTH + 1;
+    assert(!approximate_workspace_create(&workspace, 1, config));
+    config = approximate_default_config();
+    config.theta = NAN;
+    assert(!approximate_workspace_create(&workspace, 1, config));
+    assert(!workspace.nodes && !workspace.indices && !workspace.rank);
+}
+
+static void test_octree_mass_and_traversal(void)
+{
+    const ReferenceBody bodies[] = {
+        {1, {0, 0, 0}, {0}, {0}},
+        {2, {10, 0, 0}, {0}, {0}},
+        {3, {11, 0, 0}, {0}, {0}}
+    };
+    double direct_ax[3], direct_ay[3], direct_az[3];
+    Simulation simulation = from_bodies(bodies, 3);
+    SimulationView state = simulation_view(&simulation);
+    ApproximateConfig config = approximate_default_config();
+    config.bucket_capacity = 1;
+    config.theta = 100.0; /* Still must open every node containing the target. */
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, 3, config));
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.nodes[0].mass == 6.0);
+    assert_vec(workspace.nodes[0].center_of_mass, (Vec3){53.0 / 6.0, 0, 0});
+    assert(workspace.accepted_nodes > 0);
+    assert(fabs(simulation.next_ax[0] - 5.0 / (10.6 * 10.6)) < 1e-14);
+    /* Targets inside the cluster must see the other particle, not themselves. */
+    assert(fabs(simulation.next_ax[1] - (3.0 - 0.01)) < 1e-14);
+    assert(fabs(simulation.next_ax[2] - (-2.0 - 1.0 / 121.0)) < 1e-14);
+    for (size_t i = 0; i < 3; ++i) {
+        assert(simulation.next_ay[i] == 0.0 && simulation.next_az[i] == 0.0);
+    }
+    /* Full opening exercises the tree but accepts no internal aggregates. */
+    workspace.config.theta = 0.0;
+    gravity_direct(&state, direct_ax, direct_ay, direct_az, NULL);
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.accepted_nodes == 0);
+    for (size_t i = 0; i < 3; ++i) {
+        assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                   (Vec3){direct_ax[i], direct_ay[i], direct_az[i]});
+        simulation.x[i] += 100.0;
+        simulation.y[i] += 20.0;
+        simulation.z[i] -= 30.0;
+    }
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert_vec(workspace.nodes[0].center_of_mass, (Vec3){100.0 + 53.0 / 6.0, 20, -30});
+    /* Finite masses may have an unrepresentable aggregate. Direct fallback
+     * still produces representable forces for this separated cloud. */
+    simulation.w[0] = simulation.w[1] = simulation.w[2] = DBL_MAX / 2.0;
+    gravity_direct(&state, direct_ax, direct_ay, direct_az, NULL);
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.aggregate_fallback && !workspace.bounds_fallback);
+    assert(workspace.accepted_nodes == 0);
+    for (size_t i = 0; i < 3; ++i) {
+        assert(isfinite(simulation.next_ax[i]));
+        assert(simulation.next_ax[i] == direct_ax[i]);
+    }
+    /* A fresh build clears failed aggregates and diagnostics. */
+    simulation.w[0] = 1; simulation.w[1] = 2; simulation.w[2] = 3;
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(!workspace.aggregate_fallback && workspace.nodes[0].mass == 6.0);
+    /* Mass-times-position would overflow, although mass and center are finite. */
+    for (size_t i = 0; i < 3; ++i) {
+        simulation.w[i] = 1e200;
+        simulation.x[i] = simulation.y[i] = simulation.z[i] = 1e150;
+    }
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(!workspace.aggregate_fallback);
+    assert(isfinite(workspace.nodes[0].mass));
+    assert(workspace.nodes[0].center_of_mass.x == 1e150);
+    approximate_workspace_destroy(&workspace);
+    free(simulation.storage);
+}
+
+static void test_octree_full_opening_cloud(void)
+{
+    double direct_ax[64], direct_ay[64], direct_az[64];
+    Simulation simulation;
+    assert(simulation_create(&simulation, 64));
+    for (size_t i = 0; i < 64; ++i) {
+        simulation.w[i] = 1.0 + (double)(i % 7);
+        simulation.x[i] = (double)(i % 4);
+        simulation.y[i] = (double)((i / 4) % 4);
+        simulation.z[i] = (double)(i / 16);
+    }
+    SimulationView state = simulation_view(&simulation);
+    ApproximateConfig config = approximate_default_config();
+    config.theta = 0;
+    config.bucket_capacity = 1;
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, state.count, config));
+    gravity_direct(&state, direct_ax, direct_ay, direct_az, NULL);
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.node_count > 8 && workspace.accepted_nodes == 0);
+    for (size_t i = 0; i < state.count; ++i) {
+        assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                   (Vec3){direct_ax[i], direct_ay[i], direct_az[i]});
+    }
+    approximate_workspace_destroy(&workspace);
+    free(simulation.storage);
+}
+
 static void test_solver_equivalence(void)
 {
     const ReferenceBody bodies[] = {
@@ -760,10 +972,18 @@ static void test_solver_equivalence(void)
             Simulation approximate = from_bodies(bodies, count);
             simulate(&legacy, 0.01, steps, gravity);
             simulate_with_solver(&direct, 0.01, steps, gravity_direct, NULL);
-            simulate_with_solver(&approximate, 0.01, steps, gravity_approximate, NULL);
+            ApproximateWorkspace workspace;
+            assert(approximate_workspace_create(&workspace, count, approximate_default_config()));
+            simulate_with_solver(&approximate, 0.01, steps, gravity_approximate, &workspace);
+            approximate_workspace_destroy(&workspace);
             for (size_t i = 0; i < count; ++i) {
                 assert_body_equal(body_at(&legacy, i), body_at(&direct, i));
-                assert_body_equal(body_at(&direct, i), body_at(&approximate, i));
+                ReferenceBody actual = body_at(&approximate, i);
+                ReferenceBody expected = body_at(&direct, i);
+                assert(actual.w == expected.w);
+                assert_vec(actual.position, expected.position);
+                assert_vec(actual.velocity, expected.velocity);
+                assert_vec(actual.acceleration, expected.acceleration);
             }
             free(legacy.storage);
             free(direct.storage);
@@ -806,6 +1026,9 @@ static void test_solver_context_and_order(void)
 
 int main(void)
 {
+    test_octree_build_and_rebuild();
+    test_octree_mass_and_traversal();
+    test_octree_full_opening_cloud();
     test_solver_equivalence();
     test_solver_context_and_order();
     test_gravity();
