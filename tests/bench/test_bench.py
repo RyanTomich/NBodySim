@@ -81,6 +81,28 @@ class BenchTests(unittest.TestCase):
             rows = benchmark.trajectory_errors([[1, value] + [0] * 8], [[1] + [0] * 9])
             self.assertEqual(rows[0]["rms_error"], value)
 
+    def test_grouped_diagnostics_serialization_mocked(self):
+        # This binary replaces both simulation and perf gating with test doubles;
+        # no clocks, profiling, or actual performance collection are involved.
+        result = self.driver(fake=True, mode="perf", samples=1, warmups=0,
+                             solver="approximate",
+                             env={**os.environ, "BENCH_TEST_SOLVER": "approximate"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log = self.directory / "stderr.log"
+        log.write_text(result.stderr)
+        status = {}
+        benchmark.driver_metadata(self.directory, status)
+        totals = status["diagnostics"]
+        for field in ("source_node_visits", "direct_evaluations", "aggregate_evaluations"):
+            self.assertEqual(totals[field], 0)
+        # The metadata reader must preserve nonzero totals without normalization.
+        totals.update(calls=2, source_node_visits=54, direct_evaluations=44,
+                      aggregate_evaluations=4, accepted_nodes=4)
+        log.write_text("approximate_totals: " + json.dumps(totals) + "\n")
+        recorded = {}
+        benchmark.driver_metadata(self.directory, recorded)
+        self.assertEqual(recorded["diagnostics"], totals)
+
     def test_state_reader_rejects_corrupt_outputs(self):
         for content in ("", "-1", "1\n1 0", "0 extra", "1\n1 nan 0 0 0 0 0 0 0 0",
                         "1\n0 0 0 0 0 0 0 0 0 0", "1\n1 1_0 0 0 0 0 0 0 0 0",

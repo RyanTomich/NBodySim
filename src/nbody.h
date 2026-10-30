@@ -55,7 +55,7 @@ typedef void (*AccelerationSolver)(const SimulationView *state, double *ax,
 void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
                           AccelerationSolver solver, void *context);
 
-/* Update in place using forward Euler, then recompute acceleration with f.
+/* Update in place using forward Euler, then recompute acceleration.
  * Input accelerations drive the first step. No allocation or argument validation.
  * Each step swaps ax/ay/az with next_ax/next_ay/next_az after all interactions.
  * Read state through the named pointers; reacquire cached views and acceleration
@@ -63,6 +63,6 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
  * Requires storage from simulation_create, initialized state, positive finite dt,
  * and a nonnull callback. Zero count or zero steps is a no-op.
  */
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction f);
+void simulate(Simulation *simulation, double dt, size_t steps, Interaction interaction);
 
 #endif

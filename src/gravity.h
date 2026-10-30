@@ -8,20 +8,16 @@
  */
 Vec3 gravity(const SimulationView *state, size_t target, size_t source);
 
-/* Fill three separate count-element workspace arrays using scalar i < j loops.
- * Each unordered pair is evaluated once, updating both bodies. Each body's
- * contributions are accumulated in increasing source-index order, with the
- * current target's running sums retained locally throughout its source loop.
- * The first target initializes the outputs; prior workspace values are ignored.
+/* Evaluate each unordered pair once, accumulating in source-index order.
+ * Outputs need not be initialized and must be disjoint from each other and state.
  * State is read-only; coincident positions contribute zero. No allocation.
- * Workspace arrays must not overlap each other or state.
  */
 void gravity_accelerations(const SimulationView *state, double *restrict ax,
                            double *restrict ay, double *restrict az);
 
 /* Whole-system solvers. Direct ignores context. Approximate requires a prepared
  * ApproximateWorkspace (approximate.h) matching state->count for nonempty calls.
- * It rebuilds a bounded octree, aggregates mass, and traverses for each target.
+ * It rebuilds a bounded octree and shares source lists within each target leaf.
  * Unrepresentable bounds or aggregates fall back to direct gravity.
  * No allocation occurs in either callback. Empty approximate calls allow NULL.
  */

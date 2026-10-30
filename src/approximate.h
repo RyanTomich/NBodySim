@@ -3,7 +3,6 @@
 
 #include "nbody.h"
 
-/* Recursion is bounded even for caller-supplied configurations. */
 #define APPROXIMATE_MAX_DEPTH 64
 
 typedef struct {
@@ -17,27 +16,34 @@ typedef struct {
     Vec3 center;
     double half_width;
     size_t children[8]; /* SIZE_MAX means absent. */
-    size_t begin, end;
+    size_t begin, end; /* Half-open range in workspace->indices. */
     double mass;
     Vec3 center_of_mass;
+    bool is_leaf;
 } OctreeNode;
 
 typedef struct {
     size_t calls, capacity_limited_leaves, bounds_fallbacks, aggregate_fallbacks;
     size_t accepted_nodes;
+    size_t source_node_visits, direct_evaluations, aggregate_evaluations;
 } ApproximateTotals;
 
 typedef struct {
     ApproximateConfig config;
     size_t count, node_capacity, node_count;
     OctreeNode *nodes;
-    size_t *indices, *scratch, *rank;
+    size_t *indices;
+    /* count entries, reused for tree partitioning and group interaction lists. */
+    size_t *scratch;
     /* Diagnostics describe the most recent solver call, including empty calls. */
     size_t capacity_limited_leaves;
     bool bounds_fallback;
     bool aggregate_fallback;
-    size_t accepted_nodes; /* Accepted aggregates across all targets in last call. */
-    ApproximateTotals totals; /* Cumulative since creation; caller may zero between runs. */
+    size_t accepted_nodes; /* Compatibility alias for aggregate_evaluations. */
+    size_t source_node_visits; /* Source nodes visited during group discovery. */
+    size_t direct_evaluations; /* Directed particle contributions, excluding self. */
+    size_t aggregate_evaluations; /* Aggregate contributions across all targets. */
+    ApproximateTotals totals; /* Cumulative; caller may zero between runs. */
 } ApproximateWorkspace;
 
 ApproximateConfig approximate_default_config(void);

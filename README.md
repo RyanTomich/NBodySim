@@ -19,8 +19,9 @@ to stderr and return a nonzero exit status. Zero steps returns the input state
 unchanged, although numeric formatting may change.
 
 The default solver is `direct`. `approximate` uses a serial Barnes–Hut octree:
-rebuild the tree, aggregate masses and centers of mass, then traverse for each
-particle. Both solvers share the Euler loop and instance format. The default
+rebuild the tree, aggregate masses and centers of mass, then discover shared
+source lists for target leaves and evaluate each particle. Both solvers share
+the Euler loop and instance format. The default
 opening parameter is theta = 0.5. Set `--theta` to any finite nonnegative value
 with `--solver approximate`; theta zero fully opens the tree. Supplying theta
 with the direct solver is an error. Other tree settings remain configurable
@@ -308,7 +309,14 @@ The driver writes `approximate_config` and `approximate_totals` JSON lines to
 `stderr.log` outside measured intervals. The runner copies totals into the mode
 status's `diagnostics` field. Their scope is explicitly `warmups_and_samples`:
 `calls`, capacity-limited leaf counts, bounds/aggregate fallback counts, and
-accepted-node counts accumulate across every completed solver call. Failed modes
+accepted-node counts accumulate across every completed solver call. `source_node_visits`
+counts source nodes visited during shared-list discovery, including leaves and
+the root. `direct_evaluations` counts directed particle contributions (excluding
+self), and `aggregate_evaluations` counts aggregate contributions evaluated for
+individual targets. `accepted_nodes` retains the same meaning as
+`aggregate_evaluations`, rather than counting list entries. Direct fallback reports
+`count * (count - 1)` directed contributions, even though the direct kernel shares
+distance calculations between both directions. Failed modes
 retain available diagnostics; unsupported modes have no measured diagnostics.
 
 With `--compare-direct`, the runner executes one additional direct trajectory per
@@ -379,8 +387,8 @@ Use a separate output directory to retain other plots:
 
 ```sh
 build/plot-venv/bin/python plot_results.py \
-  --runs cf3be1a_20261029-233126.502386Z_timing cf3be1a_20261029-233212.934159Z_timing \
-  --baseline cf3be1a_20261029-233126.502386Z_timing \
+  --runs cf3be1a_20261029-233126.502386Z_timing_+Direct-n12272-steps10 cf3be1a_20261029-233212.934159Z_timing_+BarnesHut-PerTarget-n12272-theta0.5-steps10 \
+  --baseline cf3be1a_20261029-233126.502386Z_timing_+Direct-n12272-steps10 \
   --output-dir plots/exact-vs-approximate
 ```
 
@@ -431,23 +439,33 @@ Approximate gravity requires a prepared
 `ApproximateWorkspace` from `src/approximate.h` for nonempty states. The application
 and benchmark driver allocate it before simulation and release it afterward.
 Each approximate call rebuilds a bounded octree without allocation, accumulates
-mass and center of mass from leaves upward, and traverses it for every target.
+mass and center of mass from leaves upward, and discovers one shared source
+interaction list for each target leaf. Each particle in that leaf evaluates the
+list independently. After construction, the partition scratch buffer holds the
+reusable list of at most `count` source node indices; each entry represents a
+disjoint, nonempty source range. Nodes cache their leaf status so evaluation does
+not scan child slots for every target.
 Default tree settings are theta 0.5, bucket capacity 8, maximum depth 32, and
 a node pool of `max(1, 4 * count)`. Depth, capacity, and floating-point subdivision
 limits retain larger leaf buckets. Unrepresentable root bounds or aggregate
 mass/centers select direct fallback. Workspace diagnostics report capacity-limited
-leaves, bounds/aggregate fallback, and accepted-node counts for the latest call.
+leaves, bounds/aggregate fallback, source-node visits, direct evaluations, and
+aggregate evaluations for the latest call.
 `workspace.totals` accumulates across calls until creation/destruction or an
 explicit caller reset to `(ApproximateTotals){0}`.
 Zero bodies or zero steps makes no solver call.
 
-A node containing the target is always opened. Other internal nodes are accepted
-only when full cube width divided by center-of-mass distance is less than theta;
-zero-distance nodes are opened. Leaves evaluate particles directly, skipping the
-target by index. Theta zero opens every internal node and agrees with direct
-summation within rounding error. Independent target traversals do not exactly
-preserve pairwise force symmetry. Smaller theta generally improves accuracy at
-higher cost; errors need not decrease monotonically for each particle.
+A source node whose particle range overlaps the target leaf is always opened.
+Other internal nodes are accepted only when full cube width divided by the
+minimum distance from the source center of mass to the target group's actual
+particle bounding box is less than theta. This test is conservative for every
+target in the group geometrically. The threshold uses ordinary floating-point
+arithmetic, so rounding can affect decisions very close to theta. Zero-distance or
+unrepresentable distance bounds cause opening. Leaves evaluate particles directly,
+skipping the target by index. Theta zero opens every internal node and agrees
+with direct summation within rounding error. Grouped lists do not exactly preserve
+pairwise force symmetry. Smaller theta generally improves accuracy at higher
+cost; errors need not decrease monotonically for each particle.
 
 `gravity_solver_by_name` resolves `direct` and `approximate` to separate callbacks;
 unknown names return NULL. `gravity_direct` wraps the existing optimized O(n²)

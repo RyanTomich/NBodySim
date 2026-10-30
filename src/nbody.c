@@ -1,8 +1,7 @@
 #include "nbody.h"
 #include "gravity.h"
 
-/* All arrays are disjoint slices of storage. Rebind them on each step because
- * acceleration arrays change roles after the interactions finish. */
+/* Acceleration buffers swap roles each step; the arrays remain disjoint. */
 static void advance_state(size_t count, double dt,
                           double *restrict x, double *restrict y, double *restrict z,
                           double *restrict vx, double *restrict vy, double *restrict vz,
@@ -51,14 +50,14 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
 static void interaction_accelerations(const SimulationView *state, double *ax,
                                      double *ay, double *az, void *context)
 {
-    Interaction f = *(const Interaction *)context;
+    Interaction interaction = *(const Interaction *)context;
     for (size_t i = 0; i < state->count; ++i) {
         double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
         for (size_t j = 0; j < state->count; ++j) {
             if (i == j) {
                 continue;
             }
-            Vec3 contribution = f(state, i, j);
+            Vec3 contribution = interaction(state, i, j);
             sum_x += contribution.x;
             sum_y += contribution.y;
             sum_z += contribution.z;
@@ -69,11 +68,11 @@ static void interaction_accelerations(const SimulationView *state, double *ax,
     }
 }
 
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction f)
+void simulate(Simulation *simulation, double dt, size_t steps, Interaction interaction)
 {
-    if (f == gravity) {
+    if (interaction == gravity) {
         simulate_with_solver(simulation, dt, steps, gravity_direct, NULL);
     } else {
-        simulate_with_solver(simulation, dt, steps, interaction_accelerations, &f);
+        simulate_with_solver(simulation, dt, steps, interaction_accelerations, &interaction);
     }
 }

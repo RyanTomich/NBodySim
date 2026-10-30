@@ -187,9 +187,12 @@ cleanup:
         fprintf(stderr, "approximate_totals: {\"scope\": \"warmups_and_samples\", "
                 "\"calls\": %zu, \"capacity_limited_leaves\": %zu, "
                 "\"bounds_fallbacks\": %zu, \"aggregate_fallbacks\": %zu, "
-                "\"accepted_nodes\": %zu}\n", totals->calls,
+                "\"accepted_nodes\": %zu, \"source_node_visits\": %zu, "
+                "\"direct_evaluations\": %zu, \"aggregate_evaluations\": %zu}\n", totals->calls,
                 totals->capacity_limited_leaves, totals->bounds_fallbacks,
-                totals->aggregate_fallbacks, totals->accepted_nodes);
+                totals->aggregate_fallbacks, totals->accepted_nodes,
+                totals->source_node_visits, totals->direct_evaluations,
+                totals->aggregate_evaluations);
     }
     approximate_workspace_destroy(&workspace);
     free(durations);

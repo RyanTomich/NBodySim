@@ -61,6 +61,15 @@ static void assert_vec(Vec3 actual, Vec3 expected)
     assert(fabs(actual.z - expected.z) < 1e-12);
 }
 
+static void assert_next_accelerations(const Simulation *simulation,
+                                      const double *ax, const double *ay, const double *az)
+{
+    for (size_t i = 0; i < simulation->count; ++i) {
+        assert_vec((Vec3){simulation->next_ax[i], simulation->next_ay[i], simulation->next_az[i]},
+                   (Vec3){ax[i], ay[i], az[i]});
+    }
+}
+
 static void assert_body_equal(ReferenceBody actual, ReferenceBody expected)
 {
     assert(actual.w == expected.w);
@@ -745,10 +754,29 @@ static void test_invalid_input(void)
     assert(fclose(file) == 0);
 }
 
+/* Inspect children independently of the cached leaf flag under test. */
+static bool node_has_children(const OctreeNode *node)
+{
+    for (size_t child = 0; child < 8; ++child) {
+        if (node->children[child] != SIZE_MAX) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void check_tree(const SimulationView *state, const ApproximateWorkspace *workspace)
 {
     size_t leaves = 0;
     assert(workspace->node_count <= workspace->node_capacity);
+    bool *seen = calloc(state->count, sizeof(*seen));
+    assert(seen || state->count == 0);
+    for (size_t p = 0; p < state->count; ++p) {
+        size_t i = workspace->indices[p];
+        assert(i < state->count && !seen[i]);
+        seen[i] = true;
+    }
+    free(seen);
     for (size_t n = 0; n < workspace->node_count; ++n) {
         const OctreeNode *node = &workspace->nodes[n];
         size_t next = node->begin;
@@ -762,6 +790,7 @@ static void check_tree(const SimulationView *state, const ApproximateWorkspace *
                 next = child->end;
             }
         }
+        assert(node->is_leaf == !internal);
         if (internal) {
             assert(next == node->end);
         } else {
@@ -769,7 +798,7 @@ static void check_tree(const SimulationView *state, const ApproximateWorkspace *
         }
         for (size_t p = node->begin; p < node->end; ++p) {
             size_t i = workspace->indices[p];
-            assert(i < state->count && workspace->rank[i] == p);
+            assert(i < state->count);
             assert(fabs(state->x[i] - node->center.x) <= node->half_width);
             assert(fabs(state->y[i] - node->center.y) <= node->half_width);
             assert(fabs(state->z[i] - node->center.z) <= node->half_width);
@@ -799,12 +828,19 @@ static void test_octree_build_and_rebuild(void)
     check_tree(&state, &workspace);
     /* Rebuild a coincident cloud at a different location using the same pool. */
     OctreeNode *pool = workspace.nodes;
+    size_t *scratch = workspace.scratch;
+    /* The list has overwritten construction scratch. Its old contents must
+     * not affect a new partition or a cached leaf flag after rebuilding. */
+    for (size_t i = 0; i < state.count; ++i) {
+        workspace.scratch[i] = SIZE_MAX;
+    }
     for (size_t i = 0; i < state.count; ++i) {
         simulation.x[i] = simulation.y[i] = simulation.z[i] = 100.0;
     }
     gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
                         simulation.next_az, &workspace);
     assert(workspace.nodes == pool && workspace.nodes[0].center.x == 100.0);
+    assert(workspace.scratch == scratch);
     check_tree(&state, &workspace);
     for (size_t i = 0; i < state.count; ++i) {
         assert(simulation.next_ax[i] == 0.0 && simulation.next_ay[i] == 0.0
@@ -816,6 +852,8 @@ static void test_octree_build_and_rebuild(void)
     gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
                         simulation.next_az, &workspace);
     assert(workspace.bounds_fallback && workspace.node_count == 0);
+    assert(workspace.source_node_visits == 0 && workspace.aggregate_evaluations == 0);
+    assert(workspace.direct_evaluations == state.count * (state.count - 1));
     approximate_workspace_destroy(&workspace);
     for (size_t i = 0; i < state.count; ++i) {
         simulation.x[i] = (double)i;
@@ -841,6 +879,9 @@ static void test_octree_build_and_rebuild(void)
     SimulationView empty = {0};
     gravity_approximate(&empty, NULL, NULL, NULL, &workspace);
     assert(workspace.node_count == 0 && !workspace.bounds_fallback);
+    assert(workspace.source_node_visits == 0 && workspace.direct_evaluations == 0
+           && workspace.aggregate_evaluations == 0 && workspace.totals.calls == 1);
+    assert(!workspace.scratch);
     approximate_workspace_destroy(&workspace);
     approximate_workspace_destroy(&workspace);
     assert(!approximate_workspace_create(&workspace, SIZE_MAX, config));
@@ -849,7 +890,7 @@ static void test_octree_build_and_rebuild(void)
     config = approximate_default_config();
     config.theta = NAN;
     assert(!approximate_workspace_create(&workspace, 1, config));
-    assert(!workspace.nodes && !workspace.indices && !workspace.rank);
+    assert(!workspace.nodes && !workspace.indices && !workspace.scratch);
 }
 
 static void test_octree_mass_and_traversal(void)
@@ -902,6 +943,8 @@ static void test_octree_mass_and_traversal(void)
     gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
                         simulation.next_az, &workspace);
     assert(workspace.aggregate_fallback && !workspace.bounds_fallback);
+    assert(workspace.source_node_visits == 0 && workspace.direct_evaluations == 6
+           && workspace.aggregate_evaluations == 0);
     assert(workspace.accepted_nodes == 0);
     for (size_t i = 0; i < 3; ++i) {
         assert(isfinite(simulation.next_ax[i]));
@@ -951,6 +994,305 @@ static void test_octree_full_opening_cloud(void)
         assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
                    (Vec3){direct_ax[i], direct_ay[i], direct_az[i]});
     }
+    approximate_workspace_destroy(&workspace);
+    free(simulation.storage);
+}
+
+/* The negative pair is one target leaf; the four positive particles form
+ * an internal source subtree with three terminal leaves. */
+static void test_grouped_shared_sources(void)
+{
+    const ReferenceBody bodies[] = {
+        {1, {-10, 0, 0}, {0}, {0}}, {1, {-9, 0, 0}, {0}, {0}},
+        {1, {10, 0, 0}, {0}, {0}}, {1, {11, 0, 0}, {0}, {0}},
+        {1, {12, 0, 0}, {0}, {0}}, {1, {13, 0, 0}, {0}, {0}}
+    };
+    Simulation simulation = from_bodies(bodies, 6);
+    SimulationView state = simulation_view(&simulation);
+    ApproximateConfig config = approximate_default_config();
+    config.bucket_capacity = 2;
+    config.theta = 1;
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, 6, config));
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    for (size_t i = 0; i < 2; ++i) {
+        double distance = 11.5 - simulation.x[i];
+        double expected = (i == 0 ? 1.0 : -1.0) + 4.0 / (distance * distance);
+        assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                   (Vec3){expected, 0, 0});
+    }
+    for (size_t i = 2; i < 6; ++i) {
+        Vec3 expected = {0};
+        for (size_t j = 0; j < 6; ++j) {
+            if (i != j) {
+                expected.x += gravity(&state, i, j).x;
+            }
+        }
+        assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                   expected);
+    }
+    assert(workspace.aggregate_evaluations == 2 && workspace.accepted_nodes == 2);
+    assert(workspace.direct_evaluations == 22);
+    assert(workspace.node_count == 8);
+    assert(workspace.source_node_visits == 27); /* 3 + 3 full walks of 8 nodes. */
+    size_t first_visits = workspace.source_node_visits;
+
+    /* Rebuild after motion and force full opening. Counters reset per call. */
+    simulation.x[0] = 20;
+    workspace.config.theta = 0;
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    double ax[6], ay[6], az[6];
+    gravity_direct(&state, ax, ay, az, NULL);
+    assert_next_accelerations(&simulation, ax, ay, az);
+    assert(workspace.direct_evaluations == 30 && workspace.aggregate_evaluations == 0);
+    assert(workspace.accepted_nodes == 0);
+    assert(workspace.totals.calls == 2 && workspace.totals.direct_evaluations == 52);
+    assert(workspace.totals.aggregate_evaluations == 2 && workspace.totals.accepted_nodes == 2);
+    assert(workspace.totals.source_node_visits == first_visits + workspace.source_node_visits);
+    approximate_workspace_destroy(&workspace);
+    assert(!workspace.scratch);
+    free(simulation.storage);
+}
+
+static void test_grouped_near_target_opens_source(void)
+{
+    const ReferenceBody bodies[] = {
+        {1, {-10, 0, 0}, {0}, {0}}, {1, {-4, 0, 0}, {0}, {0}},
+        {1, {1, 0, 0}, {0}, {0}}, {1, {2, 0, 0}, {0}, {0}},
+        {1, {3, 0, 0}, {0}, {0}}, {1, {4, 0, 0}, {0}, {0}}
+    };
+    Simulation simulation = from_bodies(bodies, 6);
+    SimulationView state = simulation_view(&simulation);
+    ApproximateConfig config = approximate_default_config();
+    config.bucket_capacity = 2;
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, 6, config));
+    /* The nearest target is -4. Even the narrowest internal source cell
+     * must open: width / distance = 3.5 / 6.5 > theta. */
+    workspace.config.theta = 0.5;
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    double ax[6], ay[6], az[6];
+    gravity_direct(&state, ax, ay, az, NULL);
+    assert_next_accelerations(&simulation, ax, ay, az);
+    assert(workspace.direct_evaluations == 30 && workspace.aggregate_evaluations == 0);
+    /* Use the actual rounded cell width to exercise the strict floating-point
+     * threshold below, at, and above equality for the nearest group member. */
+    double width = INFINITY;
+    for (size_t n = 0; n < workspace.node_count; ++n) {
+        const OctreeNode *node = &workspace.nodes[n];
+        if (node->begin == 2 && node->end == 6) {
+            width = fmin(width, 2.0 * node->half_width);
+        }
+    }
+    assert(isfinite(width));
+    double threshold = width / 6.5;
+    const double thresholds[] = {nextafter(threshold, 0.0), threshold,
+                                 nextafter(threshold, INFINITY)};
+    for (size_t k = 0; k < 3; ++k) {
+        workspace.config.theta = thresholds[k];
+        gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                            simulation.next_az, &workspace);
+        assert(workspace.aggregate_evaluations == (k == 2 ? 2 : 0));
+        if (k < 2) {
+            assert_vec((Vec3){simulation.next_ax[0], simulation.next_ax[1], 0},
+                       (Vec3){ax[0], ax[1], 0});
+        } else {
+            assert_vec((Vec3){simulation.next_ax[0], simulation.next_ax[1], 0},
+                       (Vec3){1.0 / 36.0 + 4.0 / (12.5 * 12.5),
+                              -1.0 / 36.0 + 4.0 / (6.5 * 6.5), 0});
+        }
+    }
+    approximate_workspace_destroy(&workspace);
+    free(simulation.storage);
+}
+
+static void test_grouped_full_opening_configurations(void)
+{
+    const ApproximateConfig configs[] = {
+        {.bucket_capacity = 1, .max_depth = 32},
+        {.bucket_capacity = 2, .max_depth = 32},
+        {.bucket_capacity = 8, .max_depth = 32},
+        {.bucket_capacity = 1, .max_depth = 0},
+        {.bucket_capacity = 1, .max_depth = 1},
+        {.bucket_capacity = 1, .max_depth = 32, .node_capacity = 3},
+        {.theta = 100, .bucket_capacity = 64, .max_depth = 32}
+    };
+    ReferenceBody bodies[32];
+    for (size_t i = 0; i < 32; ++i) {
+        /* Includes coincident bodies, boundary coordinates, and input order
+         * distinct from spatial order. */
+        bodies[i] = (ReferenceBody){1 + i % 3,
+            {(double)((i * 7) % 5), (double)((i * 3) % 7), (double)(i % 2)}, {0}, {0}};
+    }
+    bodies[31].position = bodies[0].position;
+    for (size_t k = 0; k < sizeof(configs) / sizeof(configs[0]); ++k) {
+        Simulation simulation = from_bodies(bodies, 32);
+        SimulationView state = simulation_view(&simulation);
+        double ax[32], ay[32], az[32];
+        gravity_direct(&state, ax, ay, az, NULL);
+        ApproximateWorkspace workspace;
+        assert(approximate_workspace_create(&workspace, 32, configs[k]));
+        gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                            simulation.next_az, &workspace);
+        check_tree(&state, &workspace);
+        for (size_t i = 0; i < 32; ++i) {
+            assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                       (Vec3){ax[i], ay[i], az[i]});
+        }
+        size_t leaves = 0;
+        for (size_t n = 0; n < workspace.node_count; ++n) {
+            leaves += !node_has_children(&workspace.nodes[n]);
+        }
+        assert(workspace.source_node_visits == leaves * workspace.node_count);
+        assert(workspace.direct_evaluations == 32 * 31 && workspace.aggregate_evaluations == 0);
+        approximate_workspace_destroy(&workspace);
+        free(simulation.storage);
+    }
+}
+
+/* Independent per-target reference traversal: compute the box distance in
+ * long double and accumulate forces in long double without a shared list. */
+static void reference_group_sources(const SimulationView *state,
+                                    const ApproximateWorkspace *workspace,
+                                    const OctreeNode *group, size_t source,
+                                    size_t target, long double sum[3])
+{
+    const OctreeNode *node = &workspace->nodes[source];
+    bool leaf = !node_has_children(node);
+    const double *coordinates[] = {state->x, state->y, state->z};
+    const double center[] = {node->center_of_mass.x, node->center_of_mass.y,
+                             node->center_of_mass.z};
+    long double box_r2 = 0;
+    for (size_t axis = 0; axis < 3; ++axis) {
+        long double low = coordinates[axis][workspace->indices[group->begin]];
+        long double high = low;
+        for (size_t p = group->begin; p < group->end; ++p) {
+            long double value = coordinates[axis][workspace->indices[p]];
+            low = fminl(low, value);
+            high = fmaxl(high, value);
+        }
+        long double gap = fmaxl(0, fmaxl(low - center[axis], center[axis] - high));
+        box_r2 += gap * gap;
+    }
+    bool disjoint = node->end <= group->begin || group->end <= node->begin;
+    if (!leaf && disjoint && box_r2 > 0
+        && 2 * (long double)node->half_width / sqrtl(box_r2) < workspace->config.theta) {
+        long double delta[3], r2 = 0;
+        for (size_t axis = 0; axis < 3; ++axis) {
+            delta[axis] = (long double)center[axis] - coordinates[axis][target];
+            r2 += delta[axis] * delta[axis];
+        }
+        for (size_t axis = 0; axis < 3; ++axis) {
+            sum[axis] += node->mass * delta[axis] / (r2 * sqrtl(r2));
+        }
+    } else if (leaf) {
+        for (size_t p = node->begin; p < node->end; ++p) {
+            size_t j = workspace->indices[p];
+            if (j == target) {
+                continue;
+            }
+            long double delta[3], r2 = 0;
+            for (size_t axis = 0; axis < 3; ++axis) {
+                delta[axis] = (long double)coordinates[axis][j] - coordinates[axis][target];
+                r2 += delta[axis] * delta[axis];
+            }
+            if (r2 > 0) {
+                for (size_t axis = 0; axis < 3; ++axis) {
+                    sum[axis] += state->w[j] * delta[axis] / (r2 * sqrtl(r2));
+                }
+            }
+        }
+    } else {
+        for (size_t c = 0; c < 8; ++c) {
+            if (node->children[c] != SIZE_MAX) {
+                reference_group_sources(state, workspace, group, node->children[c], target, sum);
+            }
+        }
+    }
+}
+
+static void test_grouped_three_dimensional_reference(void)
+{
+    ReferenceBody bodies[64];
+    for (size_t i = 0; i < 64; ++i) {
+        double cluster = i % 2 ? 30 : -30;
+        bodies[i] = (ReferenceBody){1 + i % 5,
+            {cluster + (double)((i * 7) % 11), (double)((i * 3) % 13),
+             (double)((i * 11) % 17)}, {0}, {0}};
+    }
+    const double thetas[] = {0.5, 1.5, 100};
+    Simulation simulation = from_bodies(bodies, 64);
+    SimulationView state = simulation_view(&simulation);
+    ApproximateConfig config = approximate_default_config();
+    config.bucket_capacity = 4;
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, 64, config));
+    for (size_t k = 0; k < 3; ++k) {
+        workspace.config.theta = thetas[k];
+        gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                            simulation.next_az, &workspace);
+        size_t targets = 0;
+        for (size_t n = 0; n < workspace.node_count; ++n) {
+            const OctreeNode *group = &workspace.nodes[n];
+            if (node_has_children(group)) {
+                continue;
+            }
+            for (size_t p = group->begin; p < group->end; ++p) {
+                size_t i = workspace.indices[p];
+                long double sum[3] = {0};
+                reference_group_sources(&state, &workspace, group, 0, i, sum);
+                assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                           (Vec3){sum[0], sum[1], sum[2]});
+                ++targets;
+            }
+        }
+        assert(targets == 64 && workspace.aggregate_evaluations > 0);
+    }
+    approximate_workspace_destroy(&workspace);
+    free(simulation.storage);
+}
+
+static void test_grouped_extreme_distances(void)
+{
+    const double scales[] = {1e200, 1e-200};
+    for (size_t k = 0; k < 2; ++k) {
+        ReferenceBody bodies[6];
+        for (size_t i = 0; i < 6; ++i) {
+            bodies[i] = (ReferenceBody){1,
+                {(i < 2 ? -10.0 + i : 8.0 + i) * scales[k], 0, 0}, {0}, {0}};
+        }
+        Simulation simulation = from_bodies(bodies, 6);
+        SimulationView state = simulation_view(&simulation);
+        ApproximateConfig config = approximate_default_config();
+        config.bucket_capacity = 2;
+        config.theta = 100;
+        ApproximateWorkspace workspace;
+        assert(approximate_workspace_create(&workspace, 6, config));
+        gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                            simulation.next_az, &workspace);
+        assert(!workspace.bounds_fallback && !workspace.aggregate_fallback);
+        assert(workspace.node_count > 1 && workspace.aggregate_evaluations == 0);
+        assert(workspace.direct_evaluations == 30);
+        for (size_t i = 0; i < 6; ++i) {
+            assert_vec((Vec3){simulation.next_ax[i], simulation.next_ay[i], simulation.next_az[i]},
+                       (Vec3){0});
+        }
+        approximate_workspace_destroy(&workspace);
+        free(simulation.storage);
+    }
+    ReferenceBody body = {1, {1, 2, 3}, {0}, {0}};
+    Simulation simulation = from_bodies(&body, 1);
+    SimulationView state = simulation_view(&simulation);
+    ApproximateWorkspace workspace;
+    assert(approximate_workspace_create(&workspace, 1, approximate_default_config()));
+    gravity_approximate(&state, simulation.next_ax, simulation.next_ay,
+                        simulation.next_az, &workspace);
+    assert(workspace.source_node_visits == 1 && workspace.direct_evaluations == 0
+           && workspace.aggregate_evaluations == 0);
+    assert_vec((Vec3){simulation.next_ax[0], simulation.next_ay[0], simulation.next_az[0]}, (Vec3){0});
     approximate_workspace_destroy(&workspace);
     free(simulation.storage);
 }
@@ -1029,6 +1371,11 @@ int main(void)
     test_octree_build_and_rebuild();
     test_octree_mass_and_traversal();
     test_octree_full_opening_cloud();
+    test_grouped_shared_sources();
+    test_grouped_near_target_opens_source();
+    test_grouped_full_opening_configurations();
+    test_grouped_three_dimensional_reference();
+    test_grouped_extreme_distances();
     test_solver_equivalence();
     test_solver_context_and_order();
     test_gravity();

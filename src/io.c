@@ -49,17 +49,17 @@ static bool read_token(FILE *input, char token[128])
 bool read_bodies(FILE *input, Simulation *simulation)
 {
     char token[128];
-    size_t n;
+    size_t count;
     *simulation = (Simulation){0};
-    if (!read_token(input, token) || !parse_size(token, &n)) {
+    if (!read_token(input, token) || !parse_size(token, &count)) {
         return false;
     }
 
     Simulation result;
-    if (!simulation_create(&result, n)) {
+    if (!simulation_create(&result, count)) {
         return false;
     }
-    for (size_t i = 0; i < n; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         double *fields[] = {
             &result.w[i], &result.x[i], &result.y[i], &result.z[i],
             &result.vx[i], &result.vy[i], &result.vz[i],
