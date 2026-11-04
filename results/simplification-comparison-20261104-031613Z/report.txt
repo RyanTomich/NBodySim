@@ -1,0 +1,25 @@
+CommComparison: uncommitted simplification working tree versus HEAD 0448712.
+Platform: macOS arm64, Apple clang 17.0.0 (clang-1700.0.13.5).
+Build: default Makefile flags, LTO=1, -O3, fast-math disabled, assertions enabled.
+Method: each version's bench/run.py timing runner, 30 steps, dt=0.0001,
+30 samples and 2 warmups per input per pass. Two passes: HEAD then current,
+then current then HEAD. Each version/solver/input has 60 measured samples.
+Only simulate_with_solver is timed; CSV samples retain whole-call seconds.
+Inputs: tests/data/1000.txt and generated 4000-body case with --L 10
+--w-min 1 --w-max 100 --v-max 3 --a-max 2 --seed 42. Saved input copies
+are retained in each experiment. Approximate theta=0.5.
+
+Pooled mean ms/step (positive change means slower):
+direct, 1000: HEAD 0.648549, current 0.654576, +0.93%
+direct, 4000: HEAD 10.602427, current 10.585461, -0.16%
+approximate, 1000: HEAD 0.918672, current 0.904537, -1.54%
+approximate, 4000: HEAD 8.720457, current 8.659111, -0.70%
+
+No material performance regression observed for these cases. Differences are
+small and order-dependent; these measurements do not establish exact equivalence.
+All 16 timing status files report ok; stderr logs inspected for errors.
+Saved final states are byte-identical between versions for every paired case.
+make test passed: C and CLI tests, 45 Python tests with 1 real-perf test skipped.
+No hardware-counter or profiler measurements were taken on this macOS host.
+comparison.csv includes standard deviations and per-pass changes.
+Saved benchmark binaries and build logs are retained under round1 and round2.

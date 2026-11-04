@@ -1,0 +1,258 @@
+/* Shared contract tests deliberately include public headers only. */
+#include "solver.h"
+#include "test_support.h"
+#include <assert.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+static void test_preparation_errors(void)
+{
+    Solver solver;
+    const char *error;
+    SolverOption bad[] = {{"unknown", "1"}, {"theta", "nan"}, {"theta", "-1"}};
+    assert(!solver_create(&solver, "missing", 1, NULL, 0, &error));
+    assert(error && !solver.descriptor && !solver.context && !solver.acceleration);
+    solver_destroy(&solver);
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+        assert(!solver_create(&solver, "approximate", 1, &bad[i], 1, &error));
+        assert(error && !solver.context && !solver.descriptor);
+        solver_destroy(&solver);
+    }
+    SolverOption duplicate[] = {{"theta", "0"}, {"theta", "1"}};
+    assert(!solver_create(&solver, "approximate", 1, duplicate, 2, &error));
+    assert(!solver_create(&solver, "direct", 1, duplicate, 1, &error));
+    assert(!solver_create(&solver, "approximate", SIZE_MAX, NULL, 0, &error));
+    assert(!solver.context && !solver.descriptor);
+    solver_destroy(&solver);
+    assert(solver_name_at(solver_count()) == NULL);
+}
+
+typedef struct { const char *name; MetadataValue value; bool found; } MetadataCheck;
+
+static void find_metadata(const char *name, MetadataValue value, void *context)
+{
+    MetadataCheck *check = context;
+    if (strcmp(name, check->name) == 0) {
+        assert(!check->found); /* Keys must be unambiguous. */
+        check->value = value;
+        check->found = true;
+    }
+}
+
+static void test_configuration_contract(void)
+{
+    SolverOption options[] = {{"theta", "0"}, {"bucket_capacity", "2"},
+                              {"max_depth", "0"}, {"node_capacity", "1"}};
+    const size_t expected[] = {0, 2, 0, 1};
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "approximate", 3, options, 4, &error));
+    for (size_t i = 0; i < 4; ++i) {
+        MetadataCheck check = {.name = options[i].name};
+        solver_settings(&solver, find_metadata, &check);
+        assert(check.found);
+        if (i == 0) {
+            assert(check.value.type == METADATA_DOUBLE && check.value.value.real == 0);
+        } else {
+            assert(check.value.type == METADATA_SIZE && check.value.value.size == expected[i]);
+        }
+    }
+    solver_destroy(&solver);
+    SolverOption invalid[] = {{"bucket_capacity", "0"}, {"max_depth", "-1"},
+                             {"node_capacity", "-1"}};
+    for (size_t i = 0; i < 3; ++i) {
+        assert(!solver_create(&solver, "approximate", 3, &invalid[i], 1, &error));
+        solver_destroy(&solver);
+    }
+}
+
+enum { CLOUD_SIZE = 129 };
+
+static void fill_cloud(ReferenceBody *bodies)
+{
+    for (size_t i = 0; i < CLOUD_SIZE; ++i) {
+        bodies[i] = (ReferenceBody){1 + (double)(i % 3),
+            {(i % 2 ? -10 : 10) + 0.125 * (double)(i % 7),
+             0.25 * (double)(i % 11), 0.25 * (double)(i % 13)}, {0}, {0}};
+    }
+    bodies[2].position = bodies[1].position; /* Unequal masses, coincident positions. */
+}
+
+/* Return the owned input so reuse tests can keep earlier states alive. */
+static Simulation *check_force(Solver *solver, const ReferenceBody *bodies, size_t count, double tolerance)
+{
+    Simulation *s = from_bodies(bodies, count);
+    SimulationView view = simulation_view(s);
+    double ax[CLOUD_SIZE + 2], ay[CLOUD_SIZE + 2], az[CLOUD_SIZE + 2];
+    Vec3 expected[CLOUD_SIZE];
+    reference_accelerations(bodies, count, expected);
+    for (size_t i = 0; i < count + 2; ++i) {
+        ax[i] = ay[i] = az[i] = NAN;
+    }
+    ax[0] = ay[0] = az[0] = ax[count + 1] = ay[count + 1] = az[count + 1] = 12345;
+    solver->acceleration(&view, ax + 1, ay + 1, az + 1, solver->context);
+    double error = 0, norm = 0;
+    for (size_t i = 0; i < count; ++i) {
+        assert(isfinite(ax[i + 1]) && isfinite(ay[i + 1]) && isfinite(az[i + 1]));
+        error = hypot(error, hypot(hypot(ax[i + 1] - expected[i].x,
+                                        ay[i + 1] - expected[i].y), az[i + 1] - expected[i].z));
+        norm = hypot(norm, hypot(hypot(expected[i].x, expected[i].y), expected[i].z));
+        assert_body(body_at(s, i), bodies[i], 0); /* Input is immutable. */
+    }
+    assert_close(error, 0, tolerance * (1 + norm));
+    assert(ax[0] == 12345 && ay[0] == 12345 && az[0] == 12345);
+    assert(ax[count + 1] == 12345 && ay[count + 1] == 12345 && az[count + 1] == 12345);
+    return s;
+}
+
+static void test_registered_solver_contract(void)
+{
+    ReferenceBody bodies[CLOUD_SIZE];
+    for (size_t implementation = 0; implementation < solver_count(); ++implementation) {
+        const char *name = solver_name_at(implementation);
+        assert(name && *name);
+        for (size_t previous = 0; previous < implementation; ++previous) {
+            assert(strcmp(name, solver_name_at(previous)) != 0);
+        }
+        for (size_t count = 0; count <= 3; ++count) {
+            fprintf(stderr, "solver contract: %s, count=%zu\n", name, count);
+            fill_cloud(bodies);
+            Solver solver;
+            const char *error;
+            assert(solver_create(&solver, name, count, NULL, 0, &error));
+            Simulation *previous = check_force(&solver, bodies, count, 1e-11);
+            /* Keep the first allocation alive: reuse must not read cached state. */
+            ReferenceBody before[3];
+            for (size_t i = 0; i < count; ++i) {
+                before[i] = bodies[i];
+                bodies[i].w *= 2;
+                bodies[i].position = (Vec3){100, -10, 3};
+            }
+            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            for (size_t i = 0; i < count; ++i) {
+                assert_body(body_at(previous, i), before[i], 0);
+            }
+            simulation_destroy(previous);
+            solver_destroy(&solver);
+            solver_destroy(&solver);
+        }
+    }
+}
+
+static void test_gravity_accuracy(void)
+{
+    /* Known Newtonian answer anchors the independent reference's normalization. */
+    ReferenceBody pair[] = {{2, {0,0,0}, {0}, {0}}, {3, {2,0,0}, {0}, {0}}};
+    Vec3 exact[2];
+    reference_accelerations(pair, 2, exact);
+    assert_close(exact[0].x, 0.75, 0);
+    assert_close(exact[1].x, -0.5, 0);
+
+    const char *names[] = {"direct", "approximate", "approximate", "approximate", "approximate"};
+    const SolverOption options[] = {{0}, {"theta", "0"}, {"node_capacity", "1"},
+                                    {"max_depth", "0"}, {"bucket_capacity", "256"}};
+    const size_t sizes[] = {2, 7, 33, CLOUD_SIZE};
+    ReferenceBody bodies[CLOUD_SIZE];
+    for (size_t variant = 0; variant < 5; ++variant) {
+        for (size_t size = 0; size < sizeof(sizes) / sizeof(sizes[0]); ++size) {
+            size_t count = sizes[size];
+            fprintf(stderr, "exact gravity: %s, option=%s, count=%zu\n",
+                    names[variant], variant ? options[variant].name : "none", count);
+            fill_cloud(bodies);
+            Solver solver;
+            const char *error;
+            assert(solver_create(&solver, names[variant], count, &options[variant], variant ? 1 : 0, &error));
+            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            for (size_t i = 0; i < count; ++i) {
+                bodies[i].position.x += 100;
+            }
+            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            solver_destroy(&solver);
+        }
+    }
+    /* A fixed regression budget for this cloud, not a universal theta error bound. */
+    Solver approximate;
+    const char *error;
+    fill_cloud(bodies);
+    SolverOption opening = {"theta", "0.8"};
+    assert(solver_create(&approximate, "approximate", CLOUD_SIZE, &opening, 1, &error));
+    simulation_destroy(check_force(&approximate, bodies, CLOUD_SIZE, 0.02));
+    MetadataCheck calls = {.name = "calls"};
+    solver_diagnostics(&approximate, find_metadata, &calls);
+    assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 1);
+    MetadataCheck aggregates = {.name = "aggregate_evaluations"};
+    solver_diagnostics(&approximate, find_metadata, &aggregates);
+    assert(aggregates.found && aggregates.value.type == METADATA_SIZE);
+    assert(aggregates.value.value.size > 0); /* The approximation was exercised. */
+    solver_destroy(&approximate);
+    /* Loose opening must still exclude the target's own mass. */
+    const ReferenceBody separated[] = {{1, {0,0,0}, {0}, {0}},
+                                       {2, {10,0,0}, {0}, {0}},
+                                       {3, {11,0,0}, {0}, {0}}};
+    SolverOption loose[] = {{"theta", "100"}, {"bucket_capacity", "1"}};
+    assert(solver_create(&approximate, "approximate", 3, loose, 2, &error));
+    simulation_destroy(check_force(&approximate, separated, 3, 0.01));
+    solver_destroy(&approximate);
+
+}
+
+static void test_fallback_contract(void)
+{
+    /* Overflow in aggregate mass must fall back to direct evaluation and recover
+     * on a later ordinary call. All expected accelerations remain representable. */
+    ReferenceBody bodies[] = {{1e308, {0,0,0}, {0}, {0}},
+                             {1e308, {1e100,0,0}, {0}, {0}},
+                             {1e308, {2e100,0,0}, {0}, {0}}};
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "approximate", 3, NULL, 0, &error));
+    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
+    MetadataCheck fallback = {.name = "aggregate_fallbacks"};
+    solver_diagnostics(&solver, find_metadata, &fallback);
+    assert(fallback.found && fallback.value.type == METADATA_SIZE && fallback.value.value.size == 1);
+    /* Unrepresentable bounds retain the direct solver's overflow behavior. */
+    bodies[0].position.x = -1e308;
+    bodies[1].position.x = 0;
+    bodies[2].position.x = 1e308;
+    for (size_t i = 0; i < 3; ++i) {
+        bodies[i].w = 1;
+    }
+    Simulation *state = from_bodies(bodies, 3);
+    SimulationView view = simulation_view(state);
+    Solver direct;
+    assert(solver_create(&direct, "direct", 3, NULL, 0, &error));
+    double actual[3][3], expected[3][3];
+    solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+    direct.acceleration(&view, expected[0], expected[1], expected[2], direct.context);
+    for (size_t axis = 0; axis < 3; ++axis) {
+        for (size_t i = 0; i < 3; ++i) {
+            assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
+                   || actual[axis][i] == expected[axis][i]);
+        }
+    }
+    MetadataCheck bounds = {.name = "bounds_fallbacks"};
+    solver_diagnostics(&solver, find_metadata, &bounds);
+    assert(bounds.found && bounds.value.type == METADATA_SIZE && bounds.value.value.size == 1);
+    solver_destroy(&direct);
+    simulation_destroy(state);
+    for (size_t i = 0; i < 3; ++i) {
+        bodies[i].w = i + 1;
+        bodies[i].position.x = (double)i;
+    }
+    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
+    MetadataCheck calls = {.name = "calls"};
+    solver_diagnostics(&solver, find_metadata, &calls);
+    assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 3);
+    solver_destroy(&solver);
+}
+
+void test_solver(void)
+{
+    test_preparation_errors();
+    test_configuration_contract();
+    test_registered_solver_contract();
+    test_gravity_accuracy();
+    test_fallback_contract();
+}

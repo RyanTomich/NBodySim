@@ -1,5 +1,5 @@
-#ifndef APPROXIMATE_H
-#define APPROXIMATE_H
+#ifndef APPROXIMATE_INTERNAL_H
+#define APPROXIMATE_INTERNAL_H
 
 #include "nbody.h"
 
@@ -24,7 +24,6 @@ typedef struct {
 
 typedef struct {
     size_t calls, capacity_limited_leaves, bounds_fallbacks, aggregate_fallbacks;
-    size_t accepted_nodes;
     size_t source_node_visits, direct_evaluations, aggregate_evaluations;
 } ApproximateTotals;
 
@@ -39,7 +38,6 @@ typedef struct {
     size_t capacity_limited_leaves;
     bool bounds_fallback;
     bool aggregate_fallback;
-    size_t accepted_nodes; /* Compatibility alias for aggregate_evaluations. */
     size_t source_node_visits; /* Source nodes visited during group discovery. */
     size_t direct_evaluations; /* Directed particle contributions, excluding self. */
     size_t aggregate_evaluations; /* Aggregate contributions across all targets. */
@@ -53,5 +51,12 @@ bool approximate_workspace_create(ApproximateWorkspace *workspace,
                                   size_t count, ApproximateConfig config);
 /* Accepts zero-initialized/partially initialized storage; clears ownership. */
 void approximate_workspace_destroy(ApproximateWorkspace *workspace);
+
+/* Rebuild the bounded tree and share source lists within each target leaf.
+ * Context is a prepared workspace matching state->count. No allocation.
+ * Unrepresentable bounds/aggregates use direct fallback; empty calls allow NULL.
+ */
+void gravity_approximate(const SimulationView *state, double *ax, double *ay,
+                         double *az, void *context);
 
 #endif

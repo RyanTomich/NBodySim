@@ -1,7 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "gravity.h"
-#include "approximate.h"
+#include "solver.h"
+#include "metadata.h"
 #include "io.h"
 #include "perf_gate.h"
 
@@ -12,47 +12,12 @@
 #include <string.h>
 #include <time.h>
 
-static bool finite_state(const Simulation *simulation)
-{
-    /* Acceleration arrays can move; inactive workspace is not saved state. */
-    const double *fields[] = {
-        simulation->w, simulation->x, simulation->y, simulation->z,
-        simulation->vx, simulation->vy, simulation->vz,
-        simulation->ax, simulation->ay, simulation->az
-    };
-    for (size_t field = 0; field < sizeof(fields) / sizeof(fields[0]); ++field) {
-        for (size_t i = 0; i < simulation->count; ++i) {
-            if (!isfinite(fields[field][i])) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-static void reset_state(Simulation *simulation, const Simulation *initial)
-{
-    if (initial->count == 0) {
-        return;
-    }
-    double *destination[] = {
-        simulation->w, simulation->x, simulation->y, simulation->z,
-        simulation->vx, simulation->vy, simulation->vz,
-        simulation->ax, simulation->ay, simulation->az
-    };
-    const double *source[] = {
-        initial->w, initial->x, initial->y, initial->z,
-        initial->vx, initial->vy, initial->vz,
-        initial->ax, initial->ay, initial->az
-    };
-    for (size_t field = 0; field < sizeof(destination) / sizeof(destination[0]); ++field) {
-        memcpy(destination[field], source[field], initial->count * sizeof(double));
-    }
-}
-
 /* Internal CLI used by run.py. stdout contains timing samples only. */
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--metadata") == 0) {
+        return metadata_query(argc - 2, argv + 2);
+    }
     double dt;
     size_t steps, samples, warmups;
     if (argc < 8 || argc > 10) {
@@ -62,17 +27,15 @@ int main(int argc, char **argv)
     bool timing = strcmp(argv[6], "timing") == 0;
     bool perf = strcmp(argv[6], "perf") == 0;
     bool reference = strcmp(argv[6], "reference") == 0;
-    AccelerationSolver solver = gravity_solver_by_name(argc >= 9 ? argv[8] : "direct");
-    ApproximateConfig config = approximate_default_config();
-    if ((argc == 10 && (solver != gravity_approximate
-                       || !parse_double(argv[9], &config.theta) || config.theta < 0.0))
-        || (!timing && !perf && !reference) || !solver
+    const char *solver_name = argc >= 9 ? argv[8] : "direct";
+    SolverOption option = {"theta", argc == 10 ? argv[9] : NULL};
+    if ((!timing && !perf && !reference)
         || !parse_double(argv[2], &dt) || dt <= 0.0
         || !parse_size(argv[3], &steps) || steps == 0
         || !parse_size(argv[4], &samples) || samples == 0
         || samples > SIZE_MAX / sizeof(double)
         || !parse_size(argv[5], &warmups)
-        || (reference && (solver != gravity_direct || warmups != 0))
+        || (reference && (strcmp(solver_name, "direct") != 0 || warmups != 0))
         || (!timing && samples != 1)) {
         fprintf(stderr, "Invalid benchmark arguments.\n");
         return EXIT_FAILURE;
@@ -83,51 +46,43 @@ int main(int argc, char **argv)
         perror("input");
         return EXIT_FAILURE;
     }
-    Simulation initial;
+    Simulation *initial;
     bool loaded = read_bodies(input, &initial);
     int closed = fclose(input);
     if (!loaded || closed != 0) {
         fprintf(stderr, "Could not read instance.\n");
-        free(initial.storage);
+        simulation_destroy(initial);
         return EXIT_FAILURE;
     }
 
     int result = EXIT_FAILURE;
-    ApproximateWorkspace workspace = {0};
-    void *context = NULL;
-    Simulation simulation;
-    bool allocated = simulation_create(&simulation, initial.count);
+    Solver solver = {0};
+    Simulation *simulation;
+    bool allocated = simulation_create(&simulation, simulation_view(initial).count);
     double *durations = malloc(samples * sizeof(*durations));
     if (!allocated || !durations) {
         fprintf(stderr, "Could not allocate benchmark state.\n");
         goto cleanup;
     }
 
-    if (solver == gravity_approximate) {
-        if (!approximate_workspace_create(&workspace, initial.count,
-                                          config)) {
-            fprintf(stderr, "Could not allocate approximate workspace.\n");
-            goto cleanup;
-        }
-        context = &workspace;
+    const char *error;
+    if (!solver_create(&solver, solver_name, simulation_view(initial).count,
+                       &option, argc == 10 ? 1 : 0, &error)) {
+        fprintf(stderr, "%s\n", error);
+        goto cleanup;
     }
-
-    if (context) {
-        fprintf(stderr, "approximate_config: {\"theta\": %.17g, \"bucket_capacity\": %zu, "
-                "\"max_depth\": %zu, \"node_capacity\": %zu}\n",
-                config.theta, config.bucket_capacity, config.max_depth, workspace.node_capacity);
-    }
+    metadata_log(stderr, &solver, false);
     for (size_t i = 0; i < warmups; ++i) {
-        reset_state(&simulation, &initial);
-        simulate_with_solver(&simulation, dt, steps, solver, context);
-        if (!finite_state(&simulation)) {
+        (void)simulation_copy(simulation, initial);
+        simulate_with_solver(simulation, dt, steps, solver.acceleration, solver.context);
+        if (!simulation_is_finite(simulation)) {
             fprintf(stderr, "Warmup produced a nonfinite state.\n");
             goto cleanup;
         }
     }
 
     for (size_t i = 0; i < samples; ++i) {
-        reset_state(&simulation, &initial);
+        (void)simulation_copy(simulation, initial);
         struct timespec start, end;
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
@@ -139,7 +94,7 @@ int main(int argc, char **argv)
             goto cleanup;
         }
 
-        simulate_with_solver(&simulation, dt, steps, solver, context);
+        simulate_with_solver(simulation, dt, steps, solver.acceleration, solver.context);
 
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
@@ -152,7 +107,7 @@ int main(int argc, char **argv)
             perror("disable perf events");
             goto cleanup;
         }
-        if (!finite_state(&simulation)) {
+        if (!simulation_is_finite(simulation)) {
             fprintf(stderr, "Sample %zu produced a nonfinite state.\n", i + 1);
             goto cleanup;
         }
@@ -163,7 +118,7 @@ int main(int argc, char **argv)
         perror("final state");
         goto cleanup;
     }
-    bool written = write_bodies(output, &simulation);
+    bool written = write_bodies(output, simulation);
     closed = fclose(output);
     if (!written || closed != 0) {
         fprintf(stderr, "Could not write final state.\n");
@@ -182,21 +137,12 @@ int main(int argc, char **argv)
     result = EXIT_SUCCESS;
 
 cleanup:
-    if (context) {
-        const ApproximateTotals *totals = &workspace.totals;
-        fprintf(stderr, "approximate_totals: {\"scope\": \"warmups_and_samples\", "
-                "\"calls\": %zu, \"capacity_limited_leaves\": %zu, "
-                "\"bounds_fallbacks\": %zu, \"aggregate_fallbacks\": %zu, "
-                "\"accepted_nodes\": %zu, \"source_node_visits\": %zu, "
-                "\"direct_evaluations\": %zu, \"aggregate_evaluations\": %zu}\n", totals->calls,
-                totals->capacity_limited_leaves, totals->bounds_fallbacks,
-                totals->aggregate_fallbacks, totals->accepted_nodes,
-                totals->source_node_visits, totals->direct_evaluations,
-                totals->aggregate_evaluations);
+    if (solver.descriptor) {
+        metadata_log(stderr, &solver, true);
     }
-    approximate_workspace_destroy(&workspace);
+    solver_destroy(&solver);
     free(durations);
-    free(simulation.storage);
-    free(initial.storage);
+    simulation_destroy(simulation);
+    simulation_destroy(initial);
     return result;
 }

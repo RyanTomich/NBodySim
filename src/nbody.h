@@ -8,17 +8,10 @@ typedef struct {
     double x, y, z;
 } Vec3;
 
-typedef struct {
-    size_t count;
-    double *storage;
-    double *w, *x, *y, *z;
-    double *vx, *vy, *vz;
-    double *ax, *ay, *az;
-    double *next_ax, *next_ay, *next_az;
-} Simulation;
+typedef struct Simulation Simulation;
 
 /* Read-only state, excluding ownership and acceleration workspace.
- * Reacquire after simulate: acceleration pointers can change roles.
+ * Reacquire after simulate_with_solver: acceleration pointers can change roles.
  */
 typedef struct {
     size_t count;
@@ -27,18 +20,26 @@ typedef struct {
     const double *ax, *ay, *az;
 } SimulationView;
 
-/* Allocate thirteen contiguous count-element arrays initially in declaration order.
- * Initialize the ten state arrays before simulation; workspace is overwritten.
- * The destination must not own an allocation. Failure leaves it empty.
- * Zero count succeeds with null pointers. Release with free(simulation.storage).
- * Copies of Simulation share storage; they do not transfer or duplicate ownership.
+/* One allocation owns the private header and thirteen contiguous arrays. Initialize the ten state arrays before use.
+ * Creation failure sets *simulation to NULL; zero count is valid.
+ * Destroy accepts NULL. Handles must not be copied as independent owners.
  */
-bool simulation_create(Simulation *simulation, size_t count);
-/* Capture the current named state pointers, not a copy of the array contents. */
+bool simulation_create(Simulation **simulation, size_t count);
+void simulation_destroy(Simulation *simulation);
 SimulationView simulation_view(const Simulation *simulation);
 
-/* Return the source's acceleration contribution to the target, without mutation. */
-typedef Vec3 (*Interaction)(const SimulationView *state, size_t target, size_t source);
+typedef struct {
+    size_t count;
+    double *w, *x, *y, *z;
+    double *vx, *vy, *vz;
+    double *ax, *ay, *az;
+} MutableSimulationView;
+
+/* Borrowed arrays; reacquire views after integration swaps accelerations. */
+MutableSimulationView simulation_mutable_view(Simulation *simulation);
+/* Copy logical state only. Equal counts required; self-copy is valid. */
+bool simulation_copy(Simulation *destination, const Simulation *source);
+bool simulation_is_finite(const Simulation *simulation);
 
 /* Fill all three count-element outputs without modifying state or allocating.
  * Outputs must be disjoint from each other and state. Context is caller-owned;
@@ -48,21 +49,13 @@ typedef void (*AccelerationSolver)(const SimulationView *state, double *ax,
                                    double *ay, double *az, void *context);
 
 /* Shared forward Euler loop with a whole-system acceleration solver.
- * Same storage, timestep, update order, and pointer lifetime contracts as simulate.
+ * Positive finite dt required. Input accelerations drive the first step.
+ * Publish new acceleration only after evaluating all bodies; views then expire.
+ * No allocation, conversion, or validation in this loop.
  * The solver must be nonnull; context may be NULL if the solver permits it.
  * Zero count or zero steps does not invoke the solver.
  */
 void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
                           AccelerationSolver solver, void *context);
-
-/* Update in place using forward Euler, then recompute acceleration.
- * Input accelerations drive the first step. No allocation or argument validation.
- * Each step swaps ax/ay/az with next_ax/next_ay/next_az after all interactions.
- * Read state through the named pointers; reacquire cached views and acceleration
- * pointers after this call. The owning storage pointer never changes.
- * Requires storage from simulation_create, initialized state, positive finite dt,
- * and a nonnull callback. Zero count or zero steps is a no-op.
- */
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction interaction);
 
 #endif

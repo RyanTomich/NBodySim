@@ -1,5 +1,5 @@
-#ifndef GRAVITY_H
-#define GRAVITY_H
+#ifndef GRAVITY_INTERNAL_H
+#define GRAVITY_INTERNAL_H
 
 #include "nbody.h"
 
@@ -15,17 +15,7 @@ Vec3 gravity(const SimulationView *state, size_t target, size_t source);
 void gravity_accelerations(const SimulationView *state, double *restrict ax,
                            double *restrict ay, double *restrict az);
 
-/* Whole-system solvers. Direct ignores context. Approximate requires a prepared
- * ApproximateWorkspace (approximate.h) matching state->count for nonempty calls.
- * It rebuilds a bounded octree and shares source lists within each target leaf.
- * Unrepresentable bounds or aggregates fall back to direct gravity.
- * No allocation occurs in either callback. Empty approximate calls allow NULL.
- */
+/* Whole-system direct callback; context is ignored. */
 void gravity_direct(const SimulationView *state, double *ax, double *ay,
                     double *az, void *context);
-void gravity_approximate(const SimulationView *state, double *ax, double *ay,
-                         double *az, void *context);
-/* Resolve "direct" or "approximate"; unknown names return NULL. */
-AccelerationSolver gravity_solver_by_name(const char *name);
-
 #endif

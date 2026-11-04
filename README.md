@@ -305,9 +305,10 @@ Timing summaries include theta (blank for direct runs); plot and terminal labels
 include it when present. Older results without theta remain readable unchanged.
 The generator, input files, and raw timing sample format stay the same.
 
-The driver writes `approximate_config` and `approximate_totals` JSON lines to
+The driver writes `solver_config` and `solver_totals` JSON lines to
 `stderr.log` outside measured intervals. The runner copies totals into the mode
-status's `diagnostics` field. Their scope is explicitly `warmups_and_samples`:
+status's `diagnostics` field. Empty metadata produces no log record. The reader
+also accepts the older `approximate_config` and `approximate_totals` prefixes. Their scope is explicitly `warmups_and_samples`:
 `calls`, capacity-limited leaf counts, bounds/aggregate fallback counts, and
 accepted-node counts accumulate across every completed solver call. `source_node_visits`
 counts source nodes visited during shared-list discovery, including leaves and
@@ -413,31 +414,75 @@ Use `--results-dir PATH` and `--output-dir PATH` to select other directories.
 Re-running updates each instance's two images with all available results; saved
 benchmark results are unchanged.
 
-## Simulation and interaction interface
+## State, integration, and solver interfaces
 
-`src/nbody.h` defines `Vec3`, `Simulation`, a read-only `SimulationView`, and the
-callback interface:
+Public headers describe contracts; `*_internal.h` headers describe private
+representations for implementations and focused unit tests.
+
+- `nbody.h`: opaque state ownership, borrowed array views, state copying and
+  validation, and the whole-system acceleration callback used by integration.
+- `solver.h`: solver registration queries, preparation/destruction, named options,
+  and typed settings/diagnostic visitors.
+- `io.h`: instance input/output. `parse.h` supplies shared numeric parsing.
+
+The integration layer depends only on state and the acceleration contract. Solver
+implementations depend on array views, never on state ownership or scratch-buffer
+representation. The executables depend on public interfaces, never on tree nodes
+or solver workspace layouts. Benchmark serialization is separate from solver
+metadata production.
 
 ```c
-bool simulation_create(Simulation *simulation, size_t count);
-SimulationView simulation_view(const Simulation *simulation);
-typedef Vec3 (*Interaction)(const SimulationView *state, size_t target, size_t source);
-
-typedef void (*AccelerationSolver)(const SimulationView *state, double *ax,
-                                   double *ay, double *az, void *context);
-void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
-                          AccelerationSolver solver, void *context);
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction f);
+Simulation *simulation;
+if (!simulation_create(&simulation, count)) { return EXIT_FAILURE; }
+MutableSimulationView state = simulation_mutable_view(simulation);
+/* Initialize all ten arrays through state. */
+Solver solver;
+const char *error;
+if (!solver_create(&solver, "approximate", count, NULL, 0, &error)) {
+    simulation_destroy(simulation);
+    fprintf(stderr, "%s\n", error);
+    return EXIT_FAILURE;
+}
+simulate_with_solver(simulation, dt, steps, solver.acceleration, solver.context);
+SimulationView final = simulation_view(simulation);
+/* Consume final state before destroying it. */
+solver_destroy(&solver);
+simulation_destroy(simulation);
 ```
 
-`simulate_with_solver` owns the shared Euler loop. Once per step it invokes the
-whole-system solver with read-only state and three disjoint output arrays. The
-solver must fill every output without modifying state or allocating. The caller
-owns `context` and any workspace it points to; prepare that workspace before
-simulation and reuse it between steps. Direct gravity accepts NULL context.
-Approximate gravity requires a prepared
-`ApproximateWorkspace` from `src/approximate.h` for nonempty states. The application
-and benchmark driver allocate it before simulation and release it afterward.
+`simulate_with_solver` is the only production integration entry point. Once per
+step it calls the prepared solver with read-only state and three disjoint output
+arrays. The solver fills every output without modifying input or allocating.
+Preparation validates configuration and allocates reusable workspace for a fixed
+body count; no state pointers are retained. Direct accepts no options.
+Approximate accepts `theta`, `bucket_capacity`, `max_depth`, and `node_capacity`
+as named strings; duplicate/unknown options and invalid values fail preparation.
+The command line retains its existing `--theta` spelling. All defaults live in
+the backend. Zero bodies or zero steps makes no solver call.
+
+The benchmark driver supports `--metadata` to list registered solver names and
+`--metadata SOLVER COUNT [THETA]` to report effective settings as JSON. This
+unmeasured query prepares and releases a solver without integrating; it also works
+on hosts without perf. Python reads these settings rather than duplicating tree
+configuration rules. Settings are recorded even when profiling is unavailable.
+Diagnostics accumulate across warmups and samples; logging and state resets stay
+outside measurement. Historical approximate log and result fields remain readable.
+
+### Adding a CPU solver
+
+Implement a `SolverDescriptor` using the private descriptor contract: prepare,
+destroy, acceleration, settings, and diagnostics. Only the name and acceleration
+callback are required. A stateless solver omits lifecycle callbacks and accepts
+no options; absent metadata callbacks produce no fields. Preparation must clean
+up on failure. Export the descriptor and
+add its address to the static registry in `solver.c`. Add backend-specific
+numerical tests. The shared solver tests iterate the registry automatically.
+No changes to integration, state ownership, or benchmark measurement loops are
+needed. New CLI option spellings require explicit CLI support; the C preparation
+interface already accepts named backend options.
+
+### Numerical implementations
+
 Each approximate call rebuilds a bounded octree without allocation, accumulates
 mass and center of mass from leaves upward, and discovers one shared source
 interaction list for each target leaf. Each particle in that leaf evaluates the
@@ -451,8 +496,7 @@ limits retain larger leaf buckets. Unrepresentable root bounds or aggregate
 mass/centers select direct fallback. Workspace diagnostics report capacity-limited
 leaves, bounds/aggregate fallback, source-node visits, direct evaluations, and
 aggregate evaluations for the latest call.
-`workspace.totals` accumulates across calls until creation/destruction or an
-explicit caller reset to `(ApproximateTotals){0}`.
+The public diagnostic visitor reports cumulative totals for the solver lifetime.
 Zero bodies or zero steps makes no solver call.
 
 A source node whose particle range overlaps the target leaf is always opened.
@@ -467,22 +511,14 @@ with direct summation within rounding error. Grouped lists do not exactly preser
 pairwise force symmetry. Smaller theta generally improves accuracy at higher
 cost; errors need not decrease monotonically for each particle.
 
-`gravity_solver_by_name` resolves `direct` and `approximate` to separate callbacks;
-unknown names return NULL. `gravity_direct` wraps the existing optimized O(n²)
-kernel. `gravity_approximate` implements Barnes–Hut with direct fallback for
-unrepresentable tree bounds or aggregates.
-The original `simulate(..., Interaction)` remains a compatibility wrapper: gravity
-uses the direct callback, and other interactions use the original ordered-pair
-calculation through an adapter. Both paths share the same integration loop.
-
-`Simulation` owns one allocation with thirteen contiguous arrays of `count`
+One allocation holds the opaque `Simulation` header and thirteen contiguous arrays of `count`
 doubles, initially ordered as `w`, `x`, `y`, `z`, `vx`, `vy`, `vz`, `ax`, `ay`,
-`az`, followed by `next_ax`, `next_ay`, `next_az` workspace. The object stores the
-count, owning `storage` pointer, and active array pointers. Each step swaps the acceleration
+`az`, followed by `next_ax`, `next_ay`, `next_az` workspace. The header stores the
+count and active array pointers; the storage follows it. Each step swaps the acceleration
 and workspace pointers after evaluating all interactions, eliminating the final
 three array copies. Always access state through its named pointers: the first
 ten slices of `storage` no longer necessarily contain the active state.
-The owning `storage` pointer never changes. Gravity reads mass and position
+The allocation never moves. Gravity reads mass and position
 directly from their four arrays. There is no packing step or production array of
 body structs; the instance file format is unchanged.
 
@@ -490,22 +526,23 @@ body structs; the instance file format is unchanged.
 The destination must not already own storage. Initialize all ten state arrays
 before simulation; the workspace is overwritten on every step. The file reader
 allocates this storage and parses directly into the arrays. Free the allocation
-with `free(simulation.storage)`; copying the object does not duplicate ownership.
+with `simulation_destroy(simulation)`; copying a handle does not duplicate ownership.
 An empty simulation has zero count and null pointers.
 
-`simulate` updates arrays in place and trusts its caller: storage must come from
+`simulate_with_solver` updates arrays in place and trusts its caller: storage must come from
 `simulation_create`, `dt` must be positive and finite, and the callback must be
 nonnull. It performs no argument or bounds checks and cannot fail allocation.
 Zero steps or zero bodies is a no-op. The CLI validates arguments before calling
 it. `SimulationView` exposes the count and ten state arrays through pointers to
 `const double`, excluding workspace and ownership. A view captures pointers, not
 array contents. Reacquire views and cached acceleration pointers after calling
-`simulate`, because their previous arrays may now be workspace. The simulator
-refreshes its callback view each step. `f(state, target, source)`
-returns the source's contribution to the target's acceleration without mutation;
-both indices are below the view's count.
-When `f == gravity`, the simulator uses `gravity_accelerations` to process
-each unordered pair once using scalar loops over `i` and `j > i`. The first
+`simulate_with_solver`, because their previous arrays may now be workspace. The simulator
+refreshes its callback view each step. `simulation_copy` copies only the ten
+logical state arrays through their active pointers, including after odd/even
+buffer swaps. `simulation_is_finite` likewise ignores inactive workspace.
+
+The direct solver uses `gravity_accelerations` to process each unordered pair
+once using scalar loops over `i` and `j > i`. The first
 target's source loop initializes the output arrays with each body's first
 contribution, including zero for coincident pairs. Later targets accumulate
 into those outputs in increasing index order. No separate clearing pass is
@@ -528,10 +565,9 @@ storage beyond the existing state and output arrays. Each pair updates both
 bodies, so parallelizing this traversal would require coordinating shared
 output writes.
 
-Pass a different callback to use the generic target-first ordered-pair loop;
-its callback order is unchanged. Gravity calculations remain in the gravity
-module. The file reader enforces positive weights because this executable uses
-masses.
+Custom whole-system callbacks can use the same integration loop. Tests use an
+independent scalar Newtonian reference, accessed through the public solver API.
+The file reader enforces positive weights because this executable uses masses.
 
 Each step performs these operations in order:
 
@@ -587,23 +623,34 @@ detect numerical overflow during evolution.
 
 - `src/nbody.h` and `src/nbody.c`: array types, callback, and serial simulation.
 - `src/state.c`: one-time allocation and read-only array views.
-- `src/gravity.h` and `src/gravity.c`: gravitational interaction, direct kernel, and solver lookup.
-- `src/approximate.c`, `src/approximate.h`: Barnes–Hut solver and workspace lifecycle.
+- `src/gravity.c`: optimized direct gravity and its solver descriptor.
+- `src/approximate.c`: Barnes–Hut solver and private workspace lifecycle.
+- `src/solver.h`, `src/solver.c`: shared lifecycle, metadata, and static registry.
 - `src/io.h` and `src/io.c`: text input/output and numeric parsing.
-- `src/main.c`: command-line arguments and selection of the gravity callback.
+- `src/main.c`: command-line arguments and solver preparation.
 - `bench/`: separate measurement driver, Linux event gate, and Python runner.
-- `tests/`: assertion-based numerical/interface tests, CLI tests, and instances.
+- `tests/test_state.c`, `tests/test_solver.c`: public state, integration, I/O, and solver contract tests, called by one runner.
+- `tests/test_support.*`: public-view fixtures and an independent scalar gravity reference.
 - `build/`: ignored executables and generated test output.
 - `results/`: ignored, persistent experiment artifacts.
 
-`make test` checks gravity, Euler update order, supplied initial accelerations,
-callback snapshots and pair order, comparison with a direct reference solver,
-empty and single-body states, odd and even body counts, coincident bodies,
-accumulation order for both members of a pair, unchanged force inputs,
-acceleration output guards and buffer swaps, construction overflow, input
-validation, round-tripping, and resuming saved states. Python tests also cover
-benchmark boundaries, warmup/state resets, statistics, output organization,
-and tool failures. Actual Linux perf integration is opt-in:
+The C tests include only public headers. A small table of representative inputs
+covers empty/singleton states, unequal masses, coincident particles, and a 3D
+cloud. It checks input immutability, complete bounded output writes, solver reuse,
+Euler update order and snapshot consistency, state copying after odd/even runs,
+configuration validation, fallback/recovery, and file round-tripping and rejection.
+Direct and full-opening results are compared to an independent Newtonian reference
+with rounding tolerance. A fixed cloud also checks approximate accuracy with a
+scaled L2 budget `||error|| <= 0.02 * (1 + ||reference||)` at theta 0.8; this is
+not a universal theta error guarantee. Public diagnostics verify that aggregation and fallback were exercised.
+
+Tests do not prescribe tree shape, node counts, traversal order, pointer identity,
+scratch layouts, or bitwise agreement between numerical implementations. Such
+choices can change without changing the public contract. Benchmark tests retain
+measurement boundaries, resets, statistics, historical artifact compatibility,
+plot units, and failure reporting. The measurement test double uses public state
+views only; actual solver selection and results are also checked with real binaries.
+Actual Linux perf integration is opt-in:
 `NBODY_TEST_PERF=1 make test` on a host with perf access.
 An explicit skip in ordinary tests does not validate Linux event collection.
 That integration test checks profiling and cycles/instructions using temporary
@@ -629,4 +676,5 @@ make LTO=0
 Run `make clean` before manual builds with different compiler settings, including
 switching `LTO` between `0` and `1`; the benchmark runner always forces a fresh
 build. Use `make print-config` (or `make LTO=0 print-config`) to inspect the
-selected configuration. The legacy simulation and interaction interfaces remain available.
+selected configuration. Production integration uses `simulate_with_solver`;
+the test reference evaluates Newtonian gravity independently.

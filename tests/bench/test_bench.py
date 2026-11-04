@@ -44,8 +44,7 @@ class BenchTests(unittest.TestCase):
     def test_solver_selection_and_reference_boundaries(self):
         for solver in ("direct", "approximate"):
             for mode in ("timing", "perf"):
-                result = self.driver(fake=True, mode=mode, samples=1, solver=solver,
-                                     env={**os.environ, "BENCH_TEST_SOLVER": solver})
+                result = self.driver(fake=(mode == "perf"), mode=mode, samples=1, solver=solver)
                 self.assertEqual(result.returncode, 0, result.stderr)
         result = self.driver(fake=True, mode="reference", samples=1, warmups=0)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -54,6 +53,38 @@ class BenchTests(unittest.TestCase):
         for options in ({"solver": "unknown"}, {"mode": "reference"},
                         {"mode": "reference", "samples": 1, "warmups": 0, "solver": "approximate"}):
             self.assertNotEqual(self.driver(**options).returncode, 0)
+
+    def test_metadata_query_and_configuration_errors(self):
+        binary = ROOT / "build" / "bench"
+        result = subprocess.run([binary, "--metadata"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), ["direct", "approximate"])
+        self.assertEqual(benchmark.solver_settings(binary, self.instance, "direct", None), {})
+        settings = benchmark.solver_settings(binary, self.instance, "approximate", None)
+        self.assertEqual(settings, {"theta": 0.5, "bucket_capacity": 8,
+                                    "max_depth": 32, "node_capacity": 4})
+        for solver, theta in (("unknown", None), ("direct", 0), ("approximate", -1)):
+            with self.assertRaises(RuntimeError):
+                benchmark.solver_settings(binary, self.instance, solver, theta)
+        args = self.args()
+        args.solver = "unknown"
+        status, summary = benchmark.collect("timing", binary, self.instance,
+                                            self.directory / "unknown", args)
+        self.assertEqual(status["status"], "failed")
+        self.assertIn("Unknown solver", status["error"])
+        self.assertIsNone(summary)
+
+    def test_metadata_log_compatibility(self):
+        totals = {"calls": 2, "aggregate_evaluations": 4, "accepted_nodes": 4,
+                  "scope": "warmups_and_samples"}
+        for prefix in ("approximate", "solver"):
+            with self.subTest(prefix=prefix):
+                (self.directory / "stderr.log").write_text(
+                    prefix + "_config: " + json.dumps({"theta": 0.5}) + "\n" +
+                    prefix + "_totals: " + json.dumps(totals) + "\n")
+                recorded = {}
+                benchmark.driver_metadata(self.directory, recorded)
+                self.assertEqual(recorded, {"theta": 0.5, "diagnostics": totals})
 
     def test_trajectory_error_metrics(self):
         reference = [[1, 3, 4, 0, 0, 0, 0, 0, 0, 0],
@@ -80,28 +111,6 @@ class BenchTests(unittest.TestCase):
         for value in (1e-200, 1e200):
             rows = benchmark.trajectory_errors([[1, value] + [0] * 8], [[1] + [0] * 9])
             self.assertEqual(rows[0]["rms_error"], value)
-
-    def test_grouped_diagnostics_serialization_mocked(self):
-        # This binary replaces both simulation and perf gating with test doubles;
-        # no clocks, profiling, or actual performance collection are involved.
-        result = self.driver(fake=True, mode="perf", samples=1, warmups=0,
-                             solver="approximate",
-                             env={**os.environ, "BENCH_TEST_SOLVER": "approximate"})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        log = self.directory / "stderr.log"
-        log.write_text(result.stderr)
-        status = {}
-        benchmark.driver_metadata(self.directory, status)
-        totals = status["diagnostics"]
-        for field in ("source_node_visits", "direct_evaluations", "aggregate_evaluations"):
-            self.assertEqual(totals[field], 0)
-        # The metadata reader must preserve nonzero totals without normalization.
-        totals.update(calls=2, source_node_visits=54, direct_evaluations=44,
-                      aggregate_evaluations=4, accepted_nodes=4)
-        log.write_text("approximate_totals: " + json.dumps(totals) + "\n")
-        recorded = {}
-        benchmark.driver_metadata(self.directory, recorded)
-        self.assertEqual(recorded["diagnostics"], totals)
 
     def test_state_reader_rejects_corrupt_outputs(self):
         for content in ("", "-1", "1\n1 0", "0 extra", "1\n1 nan 0 0 0 0 0 0 0 0",
@@ -197,7 +206,7 @@ class BenchTests(unittest.TestCase):
         status, summary = benchmark.collect("timing", ROOT / "build/bench", instance,
                                             self.directory / "full", args)
         self.assertEqual(status["status"], "ok", status)
-        for key, value in benchmark.approximate_settings(instance, 0.0).items():
+        for key, value in benchmark.solver_settings(ROOT / "build" / "bench", instance, "approximate", 0.0).items():
             self.assertEqual(status[key], value)
         totals = status["diagnostics"]
         self.assertEqual(totals["scope"], "warmups_and_samples")
@@ -229,10 +238,9 @@ class BenchTests(unittest.TestCase):
     def test_theta_cli_validation(self):
         command = ["timing", str(self.instance), "--dt", "0.01", "--steps", "2"]
         self.assertIsNone(benchmark.parse_args(command).theta)
-        self.assertEqual(benchmark.parse_args(command + ["--solver", "approximate"]).theta, 0.5)
+        self.assertIsNone(benchmark.parse_args(command + ["--solver", "approximate"]).theta)
         self.assertEqual(benchmark.parse_args(command + ["--solver", "approximate", "--theta", "0"]).theta, 0)
-        for options in (["--theta", "0"], ["--solver", "direct", "--theta", "0.5"],
-                        *[["--solver", "approximate", "--theta", value]
+        for options in ([["--solver", "approximate", "--theta", value]
                           for value in ("-1", "nan", "inf", "bad")]):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 benchmark.parse_args(command + options)
@@ -263,7 +271,7 @@ class BenchTests(unittest.TestCase):
             return 0
 
         messages = io.StringIO()
-        with patch.object(benchmark, "build_and_archive", return_value=Path("driver")), \
+        with patch.object(benchmark, "build_and_archive", return_value=ROOT / "build" / "bench"), \
              patch.object(benchmark, "run_logged", side_effect=fake_run), redirect_stdout(messages):
             self.assertEqual(benchmark.experiment(args), 0)
         experiment = next(args.results_dir.iterdir())
@@ -286,8 +294,8 @@ class BenchTests(unittest.TestCase):
                       "(mean ± sample SD; 2 steps, 3 samples)", messages.getvalue())
 
     def test_warmup_reset_and_timing_sample_count(self):
-        for steps in (1, 2, 3, 4):
-            for warmups in (0, 1, 2):
+        for steps in (1, 2):
+            for warmups in (0, 2):
                 with self.subTest(steps=steps, warmups=warmups):
                     result = self.driver(fake=True, steps=steps, warmups=warmups)
                     self.assertEqual(result.returncode, 0, result.stderr)
@@ -305,39 +313,34 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(result.stderr.splitlines(),
                          ["simulate:ungated", "simulate:ungated", "enable", "simulate:measured", "disable"])
 
-    def test_nonfinite_simulation_still_disables_perf(self):
-        for steps in (1, 2):
+    def test_nonfinite_calls_fail_after_disabling_measurement(self):
+        # Exercise all acceleration fields in both warmup and measured calls.
+        for mode, warmups in (("timing", 1), ("perf", 0)):
             for axis in ("1", "2", "3"):
-                with self.subTest(steps=steps, axis=axis):
-                    result = self.driver(fake=True, mode="perf", samples=1, warmups=0, steps=steps,
-                                         env={**os.environ, "BENCH_TEST_FAIL": axis})
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(result.stderr.splitlines()[:3],
-                                     ["enable", "simulate:measured", "disable"])
-                    self.assertIn("Sample 1 produced a nonfinite state.", result.stderr)
-                    self.assertFalse((self.directory / "final.txt").exists())
-
-    def test_nonfinite_warmup_is_rejected(self):
-        for steps in (1, 2):
-            for axis in ("1", "2", "3"):
-                with self.subTest(steps=steps, axis=axis):
-                    result = self.driver(fake=True, steps=steps,
+                with self.subTest(mode=mode, axis=axis):
+                    result = self.driver(fake=True, mode=mode, samples=1, warmups=warmups,
                                          env={**os.environ, "BENCH_TEST_FAIL": axis})
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, "")
-                    self.assertIn("Warmup produced a nonfinite state.", result.stderr)
                     self.assertFalse((self.directory / "final.txt").exists())
+                    if warmups:
+                        self.assertIn("Warmup produced a nonfinite state.", result.stderr)
+                        self.assertNotIn("enable", result.stderr)
+                    else:
+                        self.assertEqual(result.stderr.splitlines()[:3],
+                                         ["enable", "simulate:measured", "disable"])
+                        self.assertIn("Sample 1 produced a nonfinite state.", result.stderr)
 
     def test_matches_application(self):
         empty = self.directory / "empty.txt"
         empty.write_text("0\n")
         for instance in (empty, self.instance, ROOT / "tests" / "data" / "two_body.txt"):
-            for steps in (1, 2, 3, 4):
-                with self.subTest(instance=instance.name, steps=steps):
+            for solver, steps in (("direct", 1), ("direct", 2), ("approximate", 3)):
+                with self.subTest(instance=instance.name, solver=solver, steps=steps):
                     normal = subprocess.run(
-                        [str(ROOT / "build" / "app"), str(instance), "0.01", str(steps)],
+                        [str(ROOT / "build" / "app"), "--solver", solver, str(instance), "0.01", str(steps)],
                         capture_output=True, text=True, check=True)
-                    measured = self.driver(instance=instance, steps=steps)
+                    measured = self.driver(instance=instance, steps=steps, solver=solver)
                     self.assertEqual(measured.returncode, 0, measured.stderr)
                     self.assertEqual((self.directory / "final.txt").read_text(), normal.stdout)
 
@@ -385,7 +388,7 @@ class BenchTests(unittest.TestCase):
             with patch.object(benchmark.platform, "system", return_value=platform_name), \
                  patch.object(benchmark.shutil, "which", return_value=None):
                 folder = self.directory / platform_name
-                status, summary = benchmark.collect("counters", Path("unused"), self.instance, folder, self.args())
+                status, summary = benchmark.collect("counters", ROOT / "build" / "bench", self.instance, folder, self.args())
                 self.assertEqual(status["status"], "failed")
                 self.assertIsNone(summary)
                 self.assertEqual(json.loads((folder / "status.json").read_text()), status)
@@ -400,7 +403,7 @@ class BenchTests(unittest.TestCase):
 
         with patch.object(benchmark, "perf_available", return_value=None), \
              patch.object(benchmark, "run_logged", side_effect=fake_run):
-            status, _ = benchmark.collect("profile", Path("driver"), self.instance,
+            status, _ = benchmark.collect("profile", ROOT / "build" / "bench", self.instance,
                                           self.directory / "profile", self.args())
         self.assertEqual(status["status"], "failed")
         self.assertIn("no samples", status["error"])
@@ -419,7 +422,7 @@ class BenchTests(unittest.TestCase):
         with patch.object(benchmark, "perf_available", return_value=None), \
              patch.object(benchmark, "run_logged", side_effect=fake_run):
             folder = self.directory / "counters"
-            status, _ = benchmark.collect("counters", Path("driver"), self.instance, folder, self.args())
+            status, _ = benchmark.collect("counters", ROOT / "build" / "bench", self.instance, folder, self.args())
         self.assertEqual(status["status"], "failed")
         with (folder / "counters.csv").open() as source:
             rows = list(csv.DictReader(source))

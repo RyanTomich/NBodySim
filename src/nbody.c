@@ -1,5 +1,4 @@
-#include "nbody.h"
-#include "gravity.h"
+#include "state_internal.h"
 
 /* Acceleration buffers swap roles each step; the arrays remain disjoint. */
 static void advance_state(size_t count, double dt,
@@ -44,35 +43,5 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
         simulation->next_ax = previous_ax;
         simulation->next_ay = previous_ay;
         simulation->next_az = previous_az;
-    }
-}
-
-static void interaction_accelerations(const SimulationView *state, double *ax,
-                                     double *ay, double *az, void *context)
-{
-    Interaction interaction = *(const Interaction *)context;
-    for (size_t i = 0; i < state->count; ++i) {
-        double sum_x = 0.0, sum_y = 0.0, sum_z = 0.0;
-        for (size_t j = 0; j < state->count; ++j) {
-            if (i == j) {
-                continue;
-            }
-            Vec3 contribution = interaction(state, i, j);
-            sum_x += contribution.x;
-            sum_y += contribution.y;
-            sum_z += contribution.z;
-        }
-        ax[i] = sum_x;
-        ay[i] = sum_y;
-        az[i] = sum_z;
-    }
-}
-
-void simulate(Simulation *simulation, double dt, size_t steps, Interaction interaction)
-{
-    if (interaction == gravity) {
-        simulate_with_solver(simulation, dt, steps, gravity_direct, NULL);
-    } else {
-        simulate_with_solver(simulation, dt, steps, interaction_accelerations, &interaction);
     }
 }

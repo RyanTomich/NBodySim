@@ -149,6 +149,8 @@ def draw_figure(plt, runs, observations, baseline, output, speedup=False):
     ax.set_ylabel("Speedup (×)" if speedup else "Time per step (ms)")
     title = "Speedup vs {}".format(baseline.label) if speedup else "Time per simulation step"
     title = textwrap.fill(title.replace("_", " "), width=int(width * 7))
+    if speedup:
+        title += "\nBased on time per simulation step"
     ax.set_title("{}\nInput {}".format(title, runs[0].instance), loc="left", pad=12)
     ax.set_xlim(-0.5, len(runs) - 0.5)
     ax.margins(y=0.12)

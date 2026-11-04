@@ -1,5 +1,8 @@
-#include "approximate.h"
-#include "gravity.h"
+#include "parse.h"
+#include <string.h>
+#include "solver_internal.h"
+#include "approximate_internal.h"
+#include "gravity_internal.h"
 
 #include <assert.h>
 #include <float.h>
@@ -367,7 +370,6 @@ static void evaluate_group(const SimulationView *state, double *ax, double *ay,
                 sum.x += contribution.x;
                 sum.y += contribution.y;
                 sum.z += contribution.z;
-                ++workspace->accepted_nodes;
                 ++workspace->aggregate_evaluations;
             }
         }
@@ -381,7 +383,6 @@ static void evaluate(const SimulationView *state, double *ax, double *ay,
                      double *az, ApproximateWorkspace *workspace)
 {
     workspace->capacity_limited_leaves = 0;
-    workspace->accepted_nodes = 0;
     workspace->source_node_visits = 0;
     workspace->direct_evaluations = 0;
     workspace->aggregate_evaluations = 0;
@@ -420,8 +421,78 @@ void gravity_approximate(const SimulationView *state, double *ax, double *ay,
     workspace->totals.capacity_limited_leaves += workspace->capacity_limited_leaves;
     workspace->totals.bounds_fallbacks += workspace->bounds_fallback;
     workspace->totals.aggregate_fallbacks += workspace->aggregate_fallback;
-    workspace->totals.accepted_nodes += workspace->accepted_nodes;
     workspace->totals.source_node_visits += workspace->source_node_visits;
     workspace->totals.direct_evaluations += workspace->direct_evaluations;
     workspace->totals.aggregate_evaluations += workspace->aggregate_evaluations;
 }
+
+static bool approximate_create(void **context, size_t count, const SolverOption *options,
+                               size_t option_count, const char **error)
+{
+    ApproximateConfig config = approximate_default_config();
+    for (size_t i = 0; i < option_count; ++i) {
+        const char *name = options[i].name, *value = options[i].value;
+        bool valid = false;
+        if (strcmp(name, "theta") == 0) {
+            valid = parse_double(value, &config.theta) && config.theta >= 0;
+        } else if (strcmp(name, "bucket_capacity") == 0) {
+            valid = parse_size(value, &config.bucket_capacity) && config.bucket_capacity > 0;
+        } else if (strcmp(name, "max_depth") == 0) {
+            valid = parse_size(value, &config.max_depth) && config.max_depth <= APPROXIMATE_MAX_DEPTH;
+        } else if (strcmp(name, "node_capacity") == 0) {
+            valid = parse_size(value, &config.node_capacity);
+        }
+        if (!valid) {
+            *error = "Unknown solver option or invalid value.";
+            return false;
+        }
+    }
+    ApproximateWorkspace *workspace = malloc(sizeof(*workspace));
+    if (!workspace || !approximate_workspace_create(workspace, count, config)) {
+        free(workspace);
+        *error = "Could not allocate approximate workspace.";
+        return false;
+    }
+    *context = workspace;
+    return true;
+}
+
+static void approximate_destroy(void *context)
+{
+    approximate_workspace_destroy(context);
+    free(context);
+}
+
+static void approximate_settings(const void *context, MetadataVisitor visit, void *user)
+{
+    const ApproximateWorkspace *workspace = context;
+    visit("theta", (MetadataValue){METADATA_DOUBLE, {.real = workspace->config.theta}}, user);
+    visit("bucket_capacity", (MetadataValue){METADATA_SIZE, {.size = workspace->config.bucket_capacity}}, user);
+    visit("max_depth", (MetadataValue){METADATA_SIZE, {.size = workspace->config.max_depth}}, user);
+    visit("node_capacity", (MetadataValue){METADATA_SIZE, {.size = workspace->node_capacity}}, user);
+}
+
+static void approximate_diagnostics(const void *context, MetadataVisitor visit, void *user)
+{
+    const ApproximateTotals *totals = &((const ApproximateWorkspace *)context)->totals;
+#define REPORT(field) visit(#field, (MetadataValue){METADATA_SIZE, {.size = totals->field}}, user)
+    REPORT(calls);
+    REPORT(capacity_limited_leaves);
+    REPORT(bounds_fallbacks);
+    REPORT(aggregate_fallbacks);
+    /* Historical result field, derived rather than counted twice. */
+    visit("accepted_nodes", (MetadataValue){METADATA_SIZE, {.size = totals->aggregate_evaluations}}, user);
+    REPORT(source_node_visits);
+    REPORT(direct_evaluations);
+    REPORT(aggregate_evaluations);
+#undef REPORT
+}
+
+const SolverDescriptor approximate_solver = {
+    .name = "approximate",
+    .acceleration = gravity_approximate,
+    .create = approximate_create,
+    .destroy = approximate_destroy,
+    .settings = approximate_settings,
+    .diagnostics = approximate_diagnostics
+};

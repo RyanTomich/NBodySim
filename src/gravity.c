@@ -1,7 +1,7 @@
-#include "gravity.h"
+#include "solver_internal.h"
+#include "gravity_internal.h"
 
 #include <math.h>
-#include <string.h>
 
 Vec3 gravity(const SimulationView *state, size_t target, size_t source)
 {
@@ -114,13 +114,7 @@ void gravity_direct(const SimulationView *state, double *ax, double *ay,
     gravity_accelerations(state, ax, ay, az);
 }
 
-AccelerationSolver gravity_solver_by_name(const char *name)
-{
-    if (strcmp(name, "direct") == 0) {
-        return gravity_direct;
-    }
-    if (strcmp(name, "approximate") == 0) {
-        return gravity_approximate;
-    }
-    return NULL;
-}
+const SolverDescriptor direct_solver = {
+    .name = "direct",
+    .acceleration = gravity_direct
+};

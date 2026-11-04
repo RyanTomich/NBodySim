@@ -217,25 +217,26 @@ def perf_available():
     return None
 
 
-def approximate_settings(instance, theta):
-    # Defaults shared with approximate_default_config; driver logs the actual
-    # configuration too. Record these even when perf cannot run on this host.
+def solver_settings(binary, instance, solver, theta):
+    """Ask the measured executable for its effective configuration, unmeasured."""
     with instance.open() as source:
         first = next((line.split()[0] for line in source if line.split()), "")
-    count = int(first)
-    if count < 0:
-        raise ValueError("Invalid body count")
-    return {"theta": theta, "bucket_capacity": 8, "max_depth": 32,
-            "node_capacity": max(1, 4 * count)}
+    command = [str(binary), "--metadata", solver, first]
+    if theta is not None:
+        command.append(str(theta))
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "Could not resolve solver settings")
+    return json.loads(result.stdout)
 
 
 def driver_metadata(directory, status):
     path = directory / "stderr.log"
     if path.exists():
         for line in path.read_text().splitlines():
-            if line.startswith("approximate_config: "):
+            if line.startswith(("approximate_config: ", "solver_config: ")):
                 status.update(json.loads(line.split(": ", 1)[1]))
-            elif line.startswith("approximate_totals: "):
+            elif line.startswith(("approximate_totals: ", "solver_totals: ")):
                 status["diagnostics"] = json.loads(line.split(": ", 1)[1])
 
 
@@ -245,13 +246,9 @@ def collect(mode, binary, instance, directory, args):
               "started": now(), "status": "failed"}
     summary = None
     theta = getattr(args, "theta", None)
-    if args.solver == "approximate" and theta is None:
-        theta = 0.5
-    if args.solver == "approximate":
-        status["theta"] = theta
     try:
-        if args.solver == "approximate":
-            status.update(approximate_settings(instance, theta))
+        status.update(solver_settings(binary, instance, args.solver, theta))
+        theta = status.get("theta")
         if mode != "timing":
             unavailable = perf_available()
             if unavailable:
@@ -260,7 +257,7 @@ def collect(mode, binary, instance, directory, args):
         driver = [binary, instance, str(args.dt), str(args.steps), str(samples),
                   str(args.warmups), "timing" if mode == "timing" else "perf",
                   directory / "final.txt", args.solver]
-        if args.solver == "approximate":
+        if theta is not None:
             driver.append(str(theta))
 
         if mode == "timing":
@@ -398,8 +395,8 @@ def parse_args(argv=None):
         sub.add_argument("--dt", type=float, required=True)
         sub.add_argument("--steps", type=int, required=True)
         sub.add_argument("--warmups", type=int, default=1)
-        sub.add_argument("--solver", choices=("direct", "approximate"), default="direct")
-        sub.add_argument("--theta", type=float, help="Barnes–Hut opening parameter (default: 0.5)")
+        sub.add_argument("--solver", default="direct")
+        sub.add_argument("--theta", type=float, help="solver opening parameter (default supplied by the solver)")
         sub.add_argument("--compare-direct", action="store_true",
                          help="compare final trajectory state with an unmeasured direct run")
         sub.add_argument("--results-dir", type=Path, default=ROOT / "results",
@@ -414,12 +411,8 @@ def parse_args(argv=None):
             sub.set_defaults(events=DEFAULT_EVENTS)
     args = parser.parse_args(argv)
     if args.theta is not None:
-        if args.solver != "approximate":
-            parser.error("--theta requires --solver approximate")
         if not math.isfinite(args.theta) or args.theta < 0:
             parser.error("--theta must be finite and nonnegative")
-    elif args.solver == "approximate":
-        args.theta = 0.5
     if not math.isfinite(args.dt) or args.dt <= 0 or args.steps <= 0 or args.warmups < 0:
         parser.error("dt and steps must be positive, dt finite, and warmups nonnegative")
     if args.mode in ("timing", "all") and args.samples < 2:

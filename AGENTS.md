@@ -6,11 +6,13 @@ This is a serial C17 3D N-body simulator with direct O(n²) gravity and a
 Barnes–Hut approximate solver.
 
 - `src/nbody.h` and `src/nbody.c` define array state types and simulation logic;
-  `src/state.c` allocates their storage and constructs read-only views.
+  `src/state.c` owns private storage and constructs borrowed array views.
+- `src/solver.*` defines the shared preparation, destruction, and metadata interface.
+  Keep representation details in `*_internal.h`; executables use public headers.
 - `src/gravity.*` implements direct gravity; `src/io.*` handles instance files.
 - `src/approximate.*` owns the bounded octree, aggregation, traversal, and reusable workspace.
-- `src/main.c` parses CLI arguments and selects the interaction callback.
-- `tests/test_main.c` contains unit tests; `tests/test_cli.sh` checks CLI behavior.
+- `src/main.c` parses CLI arguments and prepares the selected solver.
+- `tests/test_main.c` runs the public state and solver contract tests; `tests/test_cli.sh` checks CLI behavior.
 - `bench/` contains the separate measurement driver and Python runner;
   `tests/bench/` tests these integrations.
 - `tests/data/` holds instances. Keep generated inputs in ignored `build/` and
@@ -119,22 +121,28 @@ modules over additional abstractions.
 
 ## Architecture Constraints
 
-Keep gravity separate from the simulation loop. `Interaction` returns one
-source body's acceleration contribution without mutating state. Preserve forward
-Euler ordering: input accelerations drive the first step, and newly computed
-accelerations are assigned only after all pairs are evaluated. Preserve the
+Keep gravity separate from the simulation loop. `AccelerationSolver` fills three
+disjoint acceleration arrays without modifying input or allocating. Prepare the
+solver once through `solver_create`, reuse it for the same body count, then call
+`solver_destroy`. All configuration defaults and validation belong to the backend.
+Preserve forward Euler ordering: input accelerations drive the first step, and
+new accelerations are published only after the whole solver call. Preserve the
 instance format: body count followed by `w x y z vx vy vz ax ay az` rows.
-`Simulation` owns thirteen contiguous arrays, each of length `count`, in one
-allocation. Construct it with `simulation_create` and release `storage` with
-`free`. Initialize the ten state arrays before calling `simulate`; its three
-workspace arrays are overwritten. Validate input and allocation sizes at the
-boundary; `simulate` trusts the storage, timestep, and callback contracts.
+`Simulation` is opaque and owns thirteen contiguous count-element arrays. Create
+it with `simulation_create`, initialize the ten state arrays through its mutable
+view, and release it with `simulation_destroy`. Reacquire borrowed views after
+integration; acceleration buffers swap. Use `simulation_copy` for logical resets.
+Validate input and allocation sizes at boundaries; `simulate_with_solver` trusts
+storage, positive finite timestep, and callback contracts. Tests use an independent scalar Newtonian reference. Preserve optimized kernel arithmetic and
+iteration order when changing interfaces.
 
 ## Testing Guidelines
 
 Use standard C `assert` and name test functions `test_<behavior>`. Register new
 tests in the existing test `main`; application sources except `src/main.c` are
-linked automatically. Add regression tests for numerical or interface changes
+linked automatically. Tests and fixtures must use public headers and views.
+Prefer table-driven behavioral cases and an independent numerical reference; do
+not assert private layouts, tree structure, pointer swaps, or traversal counts. Add regression tests for numerical or interface changes
 and run `make test`. No coverage percentage is configured. Check update order,
 callback consistency, malformed input, and saved-state round-tripping when relevant.
 For actual Linux profiler/counter validation, run `NBODY_TEST_PERF=1 make test`

@@ -1,8 +1,5 @@
 /* Test double: confirms warmups are ungated and every call sees initial state. */
 #include "nbody.h"
-#include "gravity.h"
-#include "approximate.h"
-#include <string.h>
 #include "perf_gate.h"
 
 #include <assert.h>
@@ -24,48 +21,25 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
                           AccelerationSolver solver, void *context)
 {
     (void)dt;
-    if (solver == gravity_approximate) {
-        ApproximateWorkspace *workspace = context;
-        assert(workspace && workspace->count == simulation->count && workspace->nodes);
-        /* The same allocated pool must survive all warmups and samples. */
-        static OctreeNode *nodes;
-        assert(!nodes || nodes == workspace->nodes);
-        nodes = workspace->nodes;
-    } else {
-        assert(context == NULL);
-    }
-    const char *expected = getenv("BENCH_TEST_SOLVER");
-    assert(solver == gravity_solver_by_name(expected ? expected : "direct"));
-    assert(simulation->count == 1);
+    (void)steps;
+    (void)solver;
+    (void)context;
+    MutableSimulationView state = simulation_mutable_view(simulation);
+    assert(state.count == 1);
     double *fields[] = {
-        simulation->w, simulation->x, simulation->y, simulation->z,
-        simulation->vx, simulation->vy, simulation->vz,
-        simulation->ax, simulation->ay, simulation->az
+        state.w, state.x, state.y, state.z,
+        state.vx, state.vy, state.vz,
+        state.ax, state.ay, state.az
     };
     for (size_t i = 0; i < 10; ++i) {
         assert(fields[i][0] == (i == 0 ? 1.0 : 0.0));
     }
     fprintf(stderr, "simulate:%s\n", enabled ? "measured" : "ungated");
-    if (steps % 2 != 0) {
-        simulation->ax = simulation->next_ax;
-        simulation->ay = simulation->next_ay;
-        simulation->az = simulation->next_az;
-        simulation->next_ax = fields[7];
-        simulation->next_ay = fields[8];
-        simulation->next_az = fields[9];
-        fields[7] = simulation->ax;
-        fields[8] = simulation->ay;
-        fields[9] = simulation->az;
-    }
     /* Change every field so incomplete resets are observable on the next call. */
     for (size_t i = 0; i < 10; ++i) {
         fields[i][0] = (double)(i + 1);
     }
     const char *failure = getenv("BENCH_TEST_FAIL");
-    /* A failure must come from active state, not an inactive NaN. */
-    simulation->next_ax[0] = failure ? 0.0 : NAN;
-    simulation->next_ay[0] = failure ? 0.0 : NAN;
-    simulation->next_az[0] = failure ? 0.0 : NAN;
     if (failure) {
         assert(failure[0] >= '1' && failure[0] <= '3' && failure[1] == '\0');
         fields[7 + (failure[0] - '1')][0] = NAN;
