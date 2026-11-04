@@ -92,12 +92,13 @@ static bool create(void **context, size_t count, const SolverOption *options, si
         return false;
     }
     f->order = order;
-    f->direct_pair_cutoff = order == 4 ? 128 : 0;
+    f->direct_pair_cutoff = order == 4 ? 192 : 0;
     prepare_terms(f);
     /* Allow spare nodes for sparse and clustered trees. Full leaves remain
      * valid even if subdivision exhausts this pool. */
     size_t capacity = count / 2 + 1;
-    if (!octree_create(&f->tree, count, 16, 32, capacity) ||
+    size_t bucket_capacity = order == 4 ? 32 : 16;
+    if (!octree_create(&f->tree, count, bucket_capacity, 32, capacity) ||
         capacity > SIZE_MAX / sizeof(double) / (size_t)f->terms) {
         destroy(f);
         return false;
@@ -161,15 +162,24 @@ static void shift(Fmm *f, size_t parent, size_t child, bool upward)
     }
 }
 
+/* Radius in the infinity norm: half-width of an axis-aligned bounding cube. */
+static double max_axis_distance(Vec3 a, Vec3 b)
+{
+    return fmax(fabs(a.x - b.x), fmax(fabs(a.y - b.y), fabs(a.z - b.z)));
+}
+
 static bool upward_pass(Fmm *f, const SimulationView *state)
 {
     for (size_t n = f->tree.node_count; n-- > 0;) {
-        const OctreeNode *cell = &f->tree.nodes[n];
+        OctreeNode *cell = &f->tree.nodes[n];
         double *moments = f->moments + n * f->terms;
+        double extent = 0.0;
         if (cell->is_leaf) {
             for (size_t p = cell->begin; p < cell->end; ++p) {
                 size_t i = f->tree.indices[p];
-                monomials(f, position(state, i), cell);
+                Vec3 point = position(state, i);
+                extent = fmax(extent, max_axis_distance(point, cell->center));
+                monomials(f, point, cell);
                 for (int a = 0; a < f->terms; ++a) {
                     moments[a] += state->w[i] * f->polynomial[a];
                 }
@@ -177,10 +187,15 @@ static bool upward_pass(Fmm *f, const SimulationView *state)
         } else {
             for (int c = 0; c < 8; ++c) {
                 if (cell->children[c] != SIZE_MAX) {
+                    const OctreeNode *child = &f->tree.nodes[cell->children[c]];
+                    double enclosing = max_axis_distance(child->center, cell->center)
+                                     + child->occupied_half_width;
+                    extent = fmax(extent, enclosing);
                     shift(f, n, cell->children[c], true);
                 }
             }
         }
+        cell->occupied_half_width = fmin(cell->half_width, nextafter(extent, INFINITY));
         if (!finite_terms(moments, f->terms)) {
             return false;
         }
@@ -188,8 +203,12 @@ static bool upward_pass(Fmm *f, const SimulationView *state)
     return true;
 }
 
-static void translate(Fmm *f, size_t source, size_t target, const double unit[3], double r)
+static void translation_kernel(Fmm *f, const double unit[3])
 {
+    if (f->order == 4) {
+        fmm_kernel_order4(f->kernel, unit);
+        return;
+    }
     /* Taylor coefficients of 1/|unit+x| from the homogeneous Legendre
      * recurrence: d H_d = -(2d-1)(unit.x)H_(d-1) -(d-1)|x|²H_(d-2). */
     f->kernel[0] = 1;
@@ -208,6 +227,11 @@ static void translate(Fmm *f, size_t source, size_t target, const double unit[3]
         }
         f->kernel[a] = -((2 * d - 1) * linear + (d - 1) * quadratic) / d;
     }
+}
+
+static void translate(Fmm *f, size_t source, size_t target, const double unit[3], double r)
+{
+    translation_kernel(f, unit);
     double source_scale[MAX_ORDER + 1] = {1}, target_scale[MAX_ORDER + 1] = {1};
     for (size_t d = 1; d <= f->order; ++d) {
         source_scale[d] = source_scale[d - 1] * (-f->tree.nodes[source].half_width / r);
@@ -237,17 +261,22 @@ static void evaluate_direct_pair(Fmm *f, const Field *field,
 {
     for (size_t p = t->begin; p < t->end; ++p) {
         size_t i = f->tree.indices[p];
+        Vec3 sum = {field->acceleration[0][i], field->acceleration[1][i],
+                    field->acceleration[2][i]};
         for (size_t q = s->begin; q < s->end; ++q) {
             size_t j = f->tree.indices[q];
             if (i == j) {
                 continue;
             }
             Vec3 g = gravity(field->state, i, j);
-            field->acceleration[0][i] += g.x;
-            field->acceleration[1][i] += g.y;
-            field->acceleration[2][i] += g.z;
-            ++f->direct_evaluations;
+            sum.x += g.x;
+            sum.y += g.y;
+            sum.z += g.z;
         }
+        field->acceleration[0][i] = sum.x;
+        field->acceleration[1][i] = sum.y;
+        field->acceleration[2][i] = sum.z;
+        f->direct_evaluations += (s->end - s->begin) - (s->begin <= p && p < s->end);
     }
 }
 
@@ -267,7 +296,7 @@ static bool interact(Fmm *f, Field *field, size_t source, size_t target)
     if (!isfinite(r)) {
         return false;
     }
-    if (r > 0 && (s->half_width + t->half_width) <= r * (0.5 / sqrt(3.0))) {
+    if (r > 0 && (s->occupied_half_width + t->occupied_half_width) <= r * (0.5 / sqrt(3.0))) {
         double unit[] = {dx / r, dy / r, dz / r};
         translate(f, source, target, unit, r);
     } else if (s->is_leaf && t->is_leaf) {

@@ -2,6 +2,45 @@
 #ifndef FMM_ORDER4_INTERNAL_H
 #define FMM_ORDER4_INTERNAL_H
 
+static inline void fmm_kernel_order4(double kernel[35], const double unit[3])
+{
+    kernel[0] = 1;
+    kernel[1] = -(1 * (0.0 + unit[2] * kernel[0]) + 0 * (0.0)) / 1;
+    kernel[2] = -(1 * (0.0 + unit[1] * kernel[0]) + 0 * (0.0)) / 1;
+    kernel[3] = -(1 * (0.0 + unit[0] * kernel[0]) + 0 * (0.0)) / 1;
+    kernel[4] = -(3 * (0.0 + unit[2] * kernel[1]) + 1 * (0.0 + kernel[0])) / 2;
+    kernel[5] = -(3 * (0.0 + unit[1] * kernel[1] + unit[2] * kernel[2]) + 1 * (0.0)) / 2;
+    kernel[6] = -(3 * (0.0 + unit[1] * kernel[2]) + 1 * (0.0 + kernel[0])) / 2;
+    kernel[7] = -(3 * (0.0 + unit[0] * kernel[1] + unit[2] * kernel[3]) + 1 * (0.0)) / 2;
+    kernel[8] = -(3 * (0.0 + unit[0] * kernel[2] + unit[1] * kernel[3]) + 1 * (0.0)) / 2;
+    kernel[9] = -(3 * (0.0 + unit[0] * kernel[3]) + 1 * (0.0 + kernel[0])) / 2;
+    kernel[10] = -(5 * (0.0 + unit[2] * kernel[4]) + 2 * (0.0 + kernel[1])) / 3;
+    kernel[11] = -(5 * (0.0 + unit[1] * kernel[4] + unit[2] * kernel[5]) + 2 * (0.0 + kernel[2])) / 3;
+    kernel[12] = -(5 * (0.0 + unit[1] * kernel[5] + unit[2] * kernel[6]) + 2 * (0.0 + kernel[1])) / 3;
+    kernel[13] = -(5 * (0.0 + unit[1] * kernel[6]) + 2 * (0.0 + kernel[2])) / 3;
+    kernel[14] = -(5 * (0.0 + unit[0] * kernel[4] + unit[2] * kernel[7]) + 2 * (0.0 + kernel[3])) / 3;
+    kernel[15] = -(5 * (0.0 + unit[0] * kernel[5] + unit[1] * kernel[7] + unit[2] * kernel[8]) + 2 * (0.0)) / 3;
+    kernel[16] = -(5 * (0.0 + unit[0] * kernel[6] + unit[1] * kernel[8]) + 2 * (0.0 + kernel[3])) / 3;
+    kernel[17] = -(5 * (0.0 + unit[0] * kernel[7] + unit[2] * kernel[9]) + 2 * (0.0 + kernel[1])) / 3;
+    kernel[18] = -(5 * (0.0 + unit[0] * kernel[8] + unit[1] * kernel[9]) + 2 * (0.0 + kernel[2])) / 3;
+    kernel[19] = -(5 * (0.0 + unit[0] * kernel[9]) + 2 * (0.0 + kernel[3])) / 3;
+    kernel[20] = -(7 * (0.0 + unit[2] * kernel[10]) + 3 * (0.0 + kernel[4])) / 4;
+    kernel[21] = -(7 * (0.0 + unit[1] * kernel[10] + unit[2] * kernel[11]) + 3 * (0.0 + kernel[5])) / 4;
+    kernel[22] = -(7 * (0.0 + unit[1] * kernel[11] + unit[2] * kernel[12]) + 3 * (0.0 + kernel[4] + kernel[6])) / 4;
+    kernel[23] = -(7 * (0.0 + unit[1] * kernel[12] + unit[2] * kernel[13]) + 3 * (0.0 + kernel[5])) / 4;
+    kernel[24] = -(7 * (0.0 + unit[1] * kernel[13]) + 3 * (0.0 + kernel[6])) / 4;
+    kernel[25] = -(7 * (0.0 + unit[0] * kernel[10] + unit[2] * kernel[14]) + 3 * (0.0 + kernel[7])) / 4;
+    kernel[26] = -(7 * (0.0 + unit[0] * kernel[11] + unit[1] * kernel[14] + unit[2] * kernel[15]) + 3 * (0.0 + kernel[8])) / 4;
+    kernel[27] = -(7 * (0.0 + unit[0] * kernel[12] + unit[1] * kernel[15] + unit[2] * kernel[16]) + 3 * (0.0 + kernel[7])) / 4;
+    kernel[28] = -(7 * (0.0 + unit[0] * kernel[13] + unit[1] * kernel[16]) + 3 * (0.0 + kernel[8])) / 4;
+    kernel[29] = -(7 * (0.0 + unit[0] * kernel[14] + unit[2] * kernel[17]) + 3 * (0.0 + kernel[4] + kernel[9])) / 4;
+    kernel[30] = -(7 * (0.0 + unit[0] * kernel[15] + unit[1] * kernel[17] + unit[2] * kernel[18]) + 3 * (0.0 + kernel[5])) / 4;
+    kernel[31] = -(7 * (0.0 + unit[0] * kernel[16] + unit[1] * kernel[18]) + 3 * (0.0 + kernel[6] + kernel[9])) / 4;
+    kernel[32] = -(7 * (0.0 + unit[0] * kernel[17] + unit[2] * kernel[19]) + 3 * (0.0 + kernel[7])) / 4;
+    kernel[33] = -(7 * (0.0 + unit[0] * kernel[18] + unit[1] * kernel[19]) + 3 * (0.0 + kernel[8])) / 4;
+    kernel[34] = -(7 * (0.0 + unit[0] * kernel[19]) + 3 * (0.0 + kernel[9])) / 4;
+}
+
 static inline void fmm_contract_order4(double *restrict local, const double *moments,
                                        const double *kernel, const double *source_scale,
                                        const double *target_scale, double r)

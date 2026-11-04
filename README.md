@@ -35,9 +35,11 @@ The serial fast multipole solver (`--solver fmm`) accepts `--order P` from 1
 through 6 and defaults to 4. It builds Cartesian multipole expansions on the
 shared octree, translates distant cells into local potential expansions, and
 evaluates nearby particles directly. Increasing the order retains more expansion
-terms. At order 4, a pair of cells containing at most 128 source–target
-particle pairs is evaluated directly. Larger, well-separated pairs use a
-specialized 35-coefficient translation. Other orders use the generic translation.
+terms. Separation uses a cube enclosing each cell's occupied positions about
+its expansion center. At order 4, leaves hold up to 32 particles when subdivision
+is possible, and cell pairs with at most 192 source–target particle pairs are
+evaluated directly. Larger, well-separated pairs use a specialized 35-coefficient
+translation. Other orders use a leaf capacity of 16 and the generic translation.
 Use `barnes-hut` for commands that previously selected `approximate`.
 
 ```sh
@@ -332,7 +334,7 @@ individual targets. `accepted_nodes` retains the same meaning as
 distance calculations between both directions. Failed modes
 retain available diagnostics; unsupported modes have no measured diagnostics.
 
-FMM records the effective `direct_pair_cutoff` in its settings (128 at order 4,
+FMM records the effective `direct_pair_cutoff` in its settings (192 at order 4,
 zero at other orders). It reports cumulative `translations` (directed cell-to-cell interactions),
 `direct_evaluations`, `capacity_limited_leaves`, and `direct_fallbacks`.
 

@@ -153,7 +153,7 @@ static void test_fmm_cutoff_settings(void)
         MetadataCheck cutoff = {.name = "direct_pair_cutoff"};
         solver_settings(&solver, find_metadata, &cutoff);
         assert(cutoff.found && cutoff.value.type == METADATA_SIZE);
-        assert(cutoff.value.value.size == (i == 0 || i == 4 ? 128u : 0u));
+        assert(cutoff.value.value.size == (i == 0 || i == 4 ? 192u : 0u));
         solver_destroy(&solver);
     }
 }
@@ -175,6 +175,23 @@ static void test_fmm_distant_groups(void)
     const char *error;
     assert(solver_create(&solver, "fmm", count, NULL, 0, &error));
     simulation_destroy(check_force(&solver, bodies, count, 0.01));
+    solver_destroy(&solver);
+}
+
+static void test_fmm_sparse_cells(void)
+{
+    /* Two unevenly populated lines extend along different axes. Treating a
+     * partially occupied cell as concentrated at its center loses far forces. */
+    ReferenceBody bodies[CLOUD_SIZE];
+    for (size_t i = 0; i < CLOUD_SIZE; ++i) {
+        double k = (double)(i % 9);
+        Vec3 point = i < 80 ? (Vec3){-1, k, 1} : (Vec3){4, 3, 2 * k};
+        bodies[i] = (ReferenceBody){1 + (double)(i % 3), point, {0}, {0}};
+    }
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "fmm", CLOUD_SIZE, NULL, 0, &error));
+    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 0.001));
     solver_destroy(&solver);
 }
 
@@ -292,6 +309,7 @@ void test_solver(void)
     test_registered_solver_contract();
     test_fmm_cutoff_settings();
     test_fmm_distant_groups();
+    test_fmm_sparse_cells();
     test_gravity_accuracy();
     test_fallback_contract();
 }

@@ -9,7 +9,10 @@ typedef struct {
     double half_width;
     size_t children[8]; /* SIZE_MAX means absent. */
     size_t begin, end; /* Half-open range in workspace->indices. */
-    double mass;
+    union {
+        double mass; /* Barnes–Hut */
+        double occupied_half_width; /* FMM, about the expansion center */
+    };
     Vec3 center_of_mass;
     bool is_leaf;
 } OctreeNode;
