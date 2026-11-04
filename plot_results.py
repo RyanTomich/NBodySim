@@ -81,6 +81,8 @@ def load_results(results_dir, selected_runs=None):
         instance = re.sub(r"^\d+-", "", directory.parent.name)
         if status.get("solver"):
             settings = status["solver"]
+            if status.get("order") is not None:
+                settings += " order={}".format(status["order"])
             if status.get("theta") is not None:
                 settings += " theta={:g}".format(status["theta"])
             label += " [" + settings + "]"

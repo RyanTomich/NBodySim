@@ -2,15 +2,15 @@
 
 ## Project Structure & Module Organization
 
-This is a serial C17 3D N-body simulator with direct O(n²) gravity and a
-Barnes–Hut approximate solver.
+This is a serial C17 3D N-body simulator with direct O(n²) gravity and two approximate
+solvers, Barnes–Hut and FMM.
 
 - `src/nbody.h` and `src/nbody.c` define array state types and simulation logic;
   `src/state.c` owns private storage and constructs borrowed array views.
 - `src/solver.*` defines the shared preparation, destruction, and metadata interface.
   Keep representation details in `*_internal.h`; executables use public headers.
 - `src/gravity.*` implements direct gravity; `src/io.*` handles instance files.
-- `src/approximate.*` owns the bounded octree, aggregation, traversal, and reusable workspace.
+- `src/octree.c` builds the bounded octree used by `src/barnes_hut.c` and `src/fmm.c`.
 - `src/main.c` parses CLI arguments and prepares the selected solver.
 - `tests/test_main.c` runs the public state and solver contract tests; `tests/test_cli.sh` checks CLI behavior.
 - `bench/` contains the separate measurement driver and Python runner;
@@ -31,10 +31,10 @@ make clean           # Remove build/; preserve results/
 ./build/app tests/data/two_body.txt 0.01 100 > build/final.txt
 ```
 
-The application accepts `[--solver direct|approximate] [--theta VALUE] INPUT DT STEPS`
-and writes the final state to stdout. Theta defaults to 0.5 for approximate runs;
-explicit theta requires the approximate solver and must be finite and nonnegative.
-The benchmark runner accepts the same solver/theta options.
+The application accepts `[--solver direct|barnes-hut|fmm] [--theta VALUE | --order P] INPUT DT STEPS`
+and writes the final state to stdout. Theta defaults to 0.5 for Barnes–Hut runs;
+explicit theta requires Barnes–Hut and must be finite and nonnegative.
+FMM accepts integer orders 1 through 6 and defaults to 4. The benchmark runner accepts the same options.
 Use a different output filename from the input. Override compiler settings with
 commands such as `make CC=clang`; clean before changing compiler flags.
 All targets use `-O3 -g -fno-omit-frame-pointer`, with fast-math disabled and
@@ -78,7 +78,7 @@ call. Use `--results-dir PATH` to change the parent directory.
 
 Measure the entire simulation call. Keep `samples.csv` as raw whole-run seconds;
 normalize each sample by `--steps` only for summaries and plotting (never by
-`dt`). Summary CSVs record solver, theta (blank for direct), steps, dt, samples, `mean_seconds_per_step`,
+`dt`). Summary CSVs record solver, theta and order (blank when inapplicable), steps, dt, samples, `mean_seconds_per_step`,
 `variance_seconds_per_step_squared`, and `stddev_seconds_per_step`. Each mode's
 `status.json` records steps and dt. Approximate runs also record effective tree
 settings and available diagnostics, whose totals span warmups and samples. Terminal output and runtime plots use ms/step;

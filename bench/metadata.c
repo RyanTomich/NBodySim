@@ -73,13 +73,13 @@ int metadata_query(int argc, char **argv)
         puts("]");
     } else {
         size_t count;
-        if (argc < 2 || argc > 3 || !parse_size(argv[1], &count)) {
+        if ((argc != 2 && argc != 4) || !parse_size(argv[1], &count)) {
             return EXIT_FAILURE;
         }
         Solver solver;
         const char *error;
-        SolverOption option = {"theta", argc == 3 ? argv[2] : NULL};
-        if (!solver_create(&solver, argv[0], count, &option, argc == 3 ? 1 : 0, &error)) {
+        SolverOption option = {argc == 4 ? argv[2] : NULL, argc == 4 ? argv[3] : NULL};
+        if (!solver_create(&solver, argv[0], count, &option, argc == 4 ? 1 : 0, &error)) {
             fprintf(stderr, "%s\n", error);
             return EXIT_FAILURE;
         }

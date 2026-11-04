@@ -18,6 +18,7 @@ struct SolverDescriptor {
     void (*diagnostics)(const void *workspace, MetadataVisitor visit, void *context);
 };
 extern const SolverDescriptor direct_solver;
-extern const SolverDescriptor approximate_solver;
+extern const SolverDescriptor barnes_hut_solver;
+extern const SolverDescriptor fmm_solver;
 
 #endif

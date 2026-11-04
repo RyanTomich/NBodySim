@@ -20,15 +20,15 @@ int main(int argc, char **argv)
     }
     double dt;
     size_t steps, samples, warmups;
-    if (argc < 8 || argc > 10) {
-        fprintf(stderr, "Usage: %s INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate [THETA]]\n", argv[0]);
+    if (argc < 8 || (argc > 9 && argc != 11)) {
+        fprintf(stderr, "Usage: %s INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [SOLVER [OPTION VALUE]]\n", argv[0]);
         return EXIT_FAILURE;
     }
     bool timing = strcmp(argv[6], "timing") == 0;
     bool perf = strcmp(argv[6], "perf") == 0;
     bool reference = strcmp(argv[6], "reference") == 0;
     const char *solver_name = argc >= 9 ? argv[8] : "direct";
-    SolverOption option = {"theta", argc == 10 ? argv[9] : NULL};
+    SolverOption option = {argc == 11 ? argv[9] : NULL, argc == 11 ? argv[10] : NULL};
     if ((!timing && !perf && !reference)
         || !parse_double(argv[2], &dt) || dt <= 0.0
         || !parse_size(argv[3], &steps) || steps == 0
@@ -67,7 +67,7 @@ int main(int argc, char **argv)
 
     const char *error;
     if (!solver_create(&solver, solver_name, simulation_view(initial).count,
-                       &option, argc == 10 ? 1 : 0, &error)) {
+                       &option, argc == 11 ? 1 : 0, &error)) {
         fprintf(stderr, "%s\n", error);
         goto cleanup;
     }

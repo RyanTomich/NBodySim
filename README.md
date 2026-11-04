@@ -12,25 +12,36 @@ make
 make test
 ```
 
-The command is `./build/app [--solver direct|approximate] [--theta VALUE] INPUT DT STEPS`.
+The command is `./build/app [--solver direct|barnes-hut|fmm] [--theta VALUE | --order P] INPUT DT STEPS`.
 `DT` must be positive and finite;
 `STEPS` must be a nonnegative integer. The final state goes to stdout. Errors go
 to stderr and return a nonzero exit status. Zero steps returns the input state
 unchanged, although numeric formatting may change.
 
-The default solver is `direct`. `approximate` uses a serial Barnes–Hut octree:
+The default solver is `direct`. `barnes-hut` uses a serial Barnes–Hut octree:
 rebuild the tree, aggregate masses and centers of mass, then discover shared
-source lists for target leaves and evaluate each particle. Both solvers share
+source lists for target leaves and evaluate each particle. All three solvers share
 the Euler loop and instance format. The default
 opening parameter is theta = 0.5. Set `--theta` to any finite nonnegative value
-with `--solver approximate`; theta zero fully opens the tree. Supplying theta
-with the direct solver is an error. Other tree settings remain configurable
-through `ApproximateConfig` in C. Typical
+with `--solver barnes-hut`; theta zero fully opens the tree. Other Barnes–Hut tree settings can be passed as named options to `solver_create`. Typical
 work is approximately O(n log n), but unfavorable distributions or full opening
 can approach O(n²).
 
 ```sh
-./build/app --solver approximate --theta 0.5 tests/data/two_body.txt 0.01 100 > build/final-approximate.txt
+./build/app --solver barnes-hut --theta 0.5 tests/data/two_body.txt 0.01 100 > build/final-barnes-hut.txt
+```
+
+The serial fast multipole solver (`--solver fmm`) accepts `--order P` from 1
+through 6 and defaults to 4. It builds Cartesian multipole expansions on the
+shared octree, translates distant cells into local potential expansions, and
+evaluates nearby particles directly. Increasing the order retains more expansion
+terms. At order 4, a pair of cells containing at most 128 source–target
+particle pairs is evaluated directly. Larger, well-separated pairs use a
+specialized 35-coefficient translation. Other orders use the generic translation.
+Use `barnes-hut` for commands that previously selected `approximate`.
+
+```sh
+./build/app --solver fmm --order 4 tests/data/1000.txt 0.0001 1 > build/final-fmm.txt
 ```
 
 ## Instance format
@@ -289,20 +300,21 @@ results and explicit unsupported-platform statuses for Linux-only modes.
 
 ### Select a solver and evaluate error
 
-Every runner mode accepts `--solver direct|approximate` (default `direct`),
-`--theta` for approximate runs (default 0.5), and optional `--compare-direct`:
+Every runner mode accepts `--solver direct|barnes-hut|fmm` (default `direct`),
+`--theta` for Barnes–Hut (default 0.5), `--order` for FMM (default 4), and optional `--compare-direct`:
 
 ```sh
 python3 bench/run.py timing tests/data/two_body.txt --dt 0.0001 --steps 100 \
-  --samples 30 --solver approximate --theta 0.5 --compare-direct
+  --samples 30 --solver barnes-hut --theta 0.5 --compare-direct
 ```
 
 Solver selection applies to warmups and measured calls. Each mode's `status.json`,
 `timing/summary.csv`, and the aggregate `timing-summary.csv` identify the selected
-solver. Approximate mode status records effective `theta`, `bucket_capacity`,
+solver. Barnes–Hut status records effective `theta`, `bucket_capacity`,
 `max_depth`, and `node_capacity`, including modes unavailable on the host.
-Timing summaries include theta (blank for direct runs); plot and terminal labels
-include it when present. Older results without theta remain readable unchanged.
+FMM status records the expansion order and effective tree settings. Timing summaries
+record theta and order, leaving inapplicable fields blank. Plot and terminal labels
+show the applicable setting. Older results without theta remain readable unchanged.
 The generator, input files, and raw timing sample format stay the same.
 
 The driver writes `solver_config` and `solver_totals` JSON lines to
@@ -320,14 +332,17 @@ individual targets. `accepted_nodes` retains the same meaning as
 distance calculations between both directions. Failed modes
 retain available diagnostics; unsupported modes have no measured diagnostics.
 
+FMM records the effective `direct_pair_cutoff` in its settings (128 at order 4,
+zero at other orders). It reports cumulative `translations` (directed cell-to-cell interactions),
+`direct_evaluations`, `capacity_limited_leaves`, and `direct_fallbacks`.
+
 With `--compare-direct`, the runner executes one additional direct trajectory per
 input after all measurement modes finish, starting from the archived input with
 identical `dt` and `steps`. The archived benchmark executable runs this reference
 without timers, warmups, or perf gates. Reference work and Python error evaluation
 are outside every measured interval. The internal driver CLI is
-`INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [direct|approximate [THETA]]`;
-Omitting solver or theta preserves the original defaults. An explicit theta is
-valid only with the approximate solver. `reference` requires one sample, zero
+`INPUT DT STEPS SAMPLES WARMUPS timing|perf|reference FINAL_FILE [SOLVER [OPTION VALUE]]`;
+For example, append `fmm order 4` or `barnes-hut theta 0.5`. `reference` requires one sample, zero
 warmups, and the direct solver.
 
 Each input gains `reference/final.txt`, `reference/status.json`, and process logs.
@@ -371,7 +386,7 @@ two images per test instance: `plots/raw_time_<instance>.png` and
 produce four images, each accumulating all successful runs for that input.
 Labels use the suffix after the run
 type: `c7a9d7e_20261023-160502.425884Z_timing_+Linking` becomes `+Linking`.
-New runs append the solver to the label, such as `+Linking [approximate theta=0.5]`; older
+New runs append the solver to the label, such as `+Linking [barnes-hut theta=0.5]`; older
 results without solver metadata retain their labels. Runs appear in chronological
 order. Each input gets its own baseline and axes;
 failed or unfinished timing runs are skipped with a message. Historical runs
@@ -438,7 +453,7 @@ MutableSimulationView state = simulation_mutable_view(simulation);
 /* Initialize all ten arrays through state. */
 Solver solver;
 const char *error;
-if (!solver_create(&solver, "approximate", count, NULL, 0, &error)) {
+if (!solver_create(&solver, "barnes-hut", count, NULL, 0, &error)) {
     simulation_destroy(simulation);
     fprintf(stderr, "%s\n", error);
     return EXIT_FAILURE;
@@ -455,13 +470,13 @@ step it calls the prepared solver with read-only state and three disjoint output
 arrays. The solver fills every output without modifying input or allocating.
 Preparation validates configuration and allocates reusable workspace for a fixed
 body count; no state pointers are retained. Direct accepts no options.
-Approximate accepts `theta`, `bucket_capacity`, `max_depth`, and `node_capacity`
+Barnes–Hut accepts `theta`, `bucket_capacity`, `max_depth`, and `node_capacity`
 as named strings; duplicate/unknown options and invalid values fail preparation.
 The command line retains its existing `--theta` spelling. All defaults live in
 the backend. Zero bodies or zero steps makes no solver call.
 
 The benchmark driver supports `--metadata` to list registered solver names and
-`--metadata SOLVER COUNT [THETA]` to report effective settings as JSON. This
+`--metadata SOLVER COUNT [OPTION VALUE]` to report effective settings as JSON. This
 unmeasured query prepares and releases a solver without integrating; it also works
 on hosts without perf. Python reads these settings rather than duplicating tree
 configuration rules. Settings are recorded even when profiling is unavailable.
@@ -483,7 +498,7 @@ interface already accepts named backend options.
 
 ### Numerical implementations
 
-Each approximate call rebuilds a bounded octree without allocation, accumulates
+Each Barnes–Hut call rebuilds a bounded octree without allocation, accumulates
 mass and center of mass from leaves upward, and discovers one shared source
 interaction list for each target leaf. Each particle in that leaf evaluates the
 list independently. After construction, the partition scratch buffer holds the
@@ -624,7 +639,8 @@ detect numerical overflow during evolution.
 - `src/nbody.h` and `src/nbody.c`: array types, callback, and serial simulation.
 - `src/state.c`: one-time allocation and read-only array views.
 - `src/gravity.c`: optimized direct gravity and its solver descriptor.
-- `src/approximate.c`: Barnes–Hut solver and private workspace lifecycle.
+- `src/barnes_hut.c`: Barnes–Hut solver and private workspace lifecycle.
+- `src/fmm.c` implements the fast multipole solver. Both tree solvers use `src/octree.c`.
 - `src/solver.h`, `src/solver.c`: shared lifecycle, metadata, and static registry.
 - `src/io.h` and `src/io.c`: text input/output and numeric parsing.
 - `src/main.c`: command-line arguments and solver preparation.

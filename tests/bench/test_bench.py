@@ -42,7 +42,7 @@ class BenchTests(unittest.TestCase):
                                results_dir=self.directory / "results", solver="direct", compare_direct=False)
 
     def test_solver_selection_and_reference_boundaries(self):
-        for solver in ("direct", "approximate"):
+        for solver in ("direct", "barnes-hut"):
             for mode in ("timing", "perf"):
                 result = self.driver(fake=(mode == "perf"), mode=mode, samples=1, solver=solver)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -51,19 +51,19 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(result.stderr.splitlines(), ["simulate:ungated"])
         self.assertEqual(result.stdout, "")
         for options in ({"solver": "unknown"}, {"mode": "reference"},
-                        {"mode": "reference", "samples": 1, "warmups": 0, "solver": "approximate"}):
+                        {"mode": "reference", "samples": 1, "warmups": 0, "solver": "barnes-hut"}):
             self.assertNotEqual(self.driver(**options).returncode, 0)
 
     def test_metadata_query_and_configuration_errors(self):
         binary = ROOT / "build" / "bench"
         result = subprocess.run([binary, "--metadata"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), ["direct", "approximate"])
+        self.assertEqual(json.loads(result.stdout), ["direct", "barnes-hut", "fmm"])
         self.assertEqual(benchmark.solver_settings(binary, self.instance, "direct", None), {})
-        settings = benchmark.solver_settings(binary, self.instance, "approximate", None)
+        settings = benchmark.solver_settings(binary, self.instance, "barnes-hut", None)
         self.assertEqual(settings, {"theta": 0.5, "bucket_capacity": 8,
                                     "max_depth": 32, "node_capacity": 4})
-        for solver, theta in (("unknown", None), ("direct", 0), ("approximate", -1)):
+        for solver, theta in (("unknown", None), ("direct", 0), ("barnes-hut", -1)):
             with self.assertRaises(RuntimeError):
                 benchmark.solver_settings(binary, self.instance, solver, theta)
         args = self.args()
@@ -141,7 +141,7 @@ class BenchTests(unittest.TestCase):
 
     def test_reference_once_and_comparison_artifacts(self):
         args = self.args()
-        args.solver = "approximate"
+        args.solver = "barnes-hut"
         modes = ("timing", "profile", "counters")
         for mode in modes:
             folder = self.directory / mode
@@ -182,7 +182,7 @@ class BenchTests(unittest.TestCase):
 
     def test_approximate_experiment_with_reference(self):
         args = self.args()
-        args.solver = "approximate"
+        args.solver = "barnes-hut"
         args.compare_direct = True
         args.inputs.append(str(ROOT / "tests/data/two_body.txt"))
         with patch.object(benchmark, "build_and_archive", return_value=ROOT / "build" / "bench"):
@@ -192,21 +192,21 @@ class BenchTests(unittest.TestCase):
             self.assertEqual((folder / "timing/final.txt").read_bytes(),
                              (folder / "reference/final.txt").read_bytes())
             status = json.loads((folder / "timing/status.json").read_text())
-            self.assertEqual(status["solver"], "approximate")
+            self.assertEqual(status["solver"], "barnes-hut")
             self.assertEqual(status["theta"], 0.5)
         with (experiment / "timing-summary.csv").open() as source:
-            self.assertTrue(all(row["solver"] == "approximate" and float(row["theta"]) == 0.5
+            self.assertTrue(all(row["solver"] == "barnes-hut" and float(row["theta"]) == 0.5
                                 for row in csv.DictReader(source)))
 
     def test_theta_driver_and_recorded_settings(self):
         args = self.args()
-        args.solver = "approximate"
+        args.solver = "barnes-hut"
         args.theta = 0.0
         instance = ROOT / "tests/data/1000.txt"
         status, summary = benchmark.collect("timing", ROOT / "build/bench", instance,
                                             self.directory / "full", args)
         self.assertEqual(status["status"], "ok", status)
-        for key, value in benchmark.solver_settings(ROOT / "build" / "bench", instance, "approximate", 0.0).items():
+        for key, value in benchmark.solver_settings(ROOT / "build" / "bench", instance, "barnes-hut", 0.0).items():
             self.assertEqual(status[key], value)
         totals = status["diagnostics"]
         self.assertEqual(totals["scope"], "warmups_and_samples")
@@ -230,17 +230,17 @@ class BenchTests(unittest.TestCase):
                    "timing", str(self.directory / "final.txt")]
         # Historical internal-driver syntax continues to work.
         self.assertEqual(subprocess.run(command, capture_output=True).returncode, 0)
-        for solver, theta in (("direct", "0"), ("approximate", "nan"),
-                              ("approximate", "-1"), ("approximate", "inf")):
-            self.assertNotEqual(subprocess.run(command + [solver, theta],
+        for solver, theta in (("direct", "0"), ("barnes-hut", "nan"),
+                              ("barnes-hut", "-1"), ("barnes-hut", "inf")):
+            self.assertNotEqual(subprocess.run(command + [solver, "theta", theta],
                                                capture_output=True).returncode, 0)
 
     def test_theta_cli_validation(self):
         command = ["timing", str(self.instance), "--dt", "0.01", "--steps", "2"]
         self.assertIsNone(benchmark.parse_args(command).theta)
-        self.assertIsNone(benchmark.parse_args(command + ["--solver", "approximate"]).theta)
-        self.assertEqual(benchmark.parse_args(command + ["--solver", "approximate", "--theta", "0"]).theta, 0)
-        for options in ([["--solver", "approximate", "--theta", value]
+        self.assertIsNone(benchmark.parse_args(command + ["--solver", "barnes-hut"]).theta)
+        self.assertEqual(benchmark.parse_args(command + ["--solver", "barnes-hut", "--theta", "0"]).theta, 0)
+        for options in ([["--solver", "barnes-hut", "--theta", value]
                           for value in ("-1", "nan", "inf", "bad")]):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 benchmark.parse_args(command + options)
@@ -335,7 +335,7 @@ class BenchTests(unittest.TestCase):
         empty = self.directory / "empty.txt"
         empty.write_text("0\n")
         for instance in (empty, self.instance, ROOT / "tests" / "data" / "two_body.txt"):
-            for solver, steps in (("direct", 1), ("direct", 2), ("approximate", 3)):
+            for solver, steps in (("direct", 1), ("direct", 2), ("barnes-hut", 3)):
                 with self.subTest(instance=instance.name, solver=solver, steps=steps):
                     normal = subprocess.run(
                         [str(ROOT / "build" / "app"), "--solver", solver, str(instance), "0.01", str(steps)],
@@ -529,8 +529,8 @@ class BenchTests(unittest.TestCase):
         self.assertEqual(args.results_dir, self.directory)
         self.assertEqual(args.solver, "direct")
         self.assertFalse(args.compare_direct)
-        args = benchmark.parse_args([*required, "--solver", "approximate", "--compare-direct"])
-        self.assertEqual(args.solver, "approximate")
+        args = benchmark.parse_args([*required, "--solver", "barnes-hut", "--compare-direct"])
+        self.assertEqual(args.solver, "barnes-hut")
         self.assertTrue(args.compare_direct)
 
 

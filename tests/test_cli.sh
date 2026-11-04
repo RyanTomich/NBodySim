@@ -41,8 +41,8 @@ cmp build/cli-expected.txt build/cli-output.txt
 ./build/app tests/data/two_body.txt 0.01 10 > build/cli-direct.txt
 cmp build/cli-resumed.txt build/cli-direct.txt
 
-# Either solver is selectable before or after positional arguments.
-for solver in direct approximate; do
+# Each solver is selectable before or after positional arguments.
+for solver in direct barnes-hut fmm; do
     for steps in 0 1 2 3; do
         ./build/app tests/data/two_body.txt 0.01 "$steps" > build/cli-default.txt
         ./build/app --solver "$solver" tests/data/two_body.txt 0.01 "$steps" > build/cli-output.txt
@@ -53,20 +53,27 @@ for solver in direct approximate; do
 done
 expect_failure tests/data/two_body.txt 0.01 1 --solver
 expect_failure tests/data/two_body.txt 0.01 1 --solver unknown
-expect_failure --solver direct tests/data/two_body.txt 0.01 1 --solver approximate
+expect_failure --solver direct tests/data/two_body.txt 0.01 1 --solver barnes-hut
 
-# Theta is valid only for approximate runs, including full opening at zero.
+# Theta is valid only for Barnes–Hut runs, including full opening at zero.
 for theta in 0 0.25 1; do
-    ./build/app --theta "$theta" tests/data/two_body.txt 0.01 2 --solver approximate > build/cli-output.txt
-    ./build/app --solver approximate --theta "$theta" tests/data/two_body.txt 0.01 2 > build/cli-default.txt
+    ./build/app --theta "$theta" tests/data/two_body.txt 0.01 2 --solver barnes-hut > build/cli-output.txt
+    ./build/app --solver barnes-hut --theta "$theta" tests/data/two_body.txt 0.01 2 > build/cli-default.txt
     cmp build/cli-default.txt build/cli-output.txt
 done
 for theta in -1 nan inf 1e999 bad ''; do
-    expect_failure --solver approximate --theta "$theta" tests/data/two_body.txt 0.01 1
+    expect_failure --solver barnes-hut --theta "$theta" tests/data/two_body.txt 0.01 1
 done
 expect_failure --theta 0.5 tests/data/two_body.txt 0.01 1
 expect_failure --solver direct --theta 0 tests/data/two_body.txt 0.01 1
-expect_failure --solver approximate tests/data/two_body.txt 0.01 1 --theta
-expect_failure --solver approximate --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
+expect_failure --solver barnes-hut tests/data/two_body.txt 0.01 1 --theta
+expect_failure --solver barnes-hut --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
+
+expect_failure --solver approximate tests/data/two_body.txt 0.01 0
+expect_failure --solver fmm --theta 0 tests/data/two_body.txt 0.01 0
+expect_failure --solver barnes-hut --order 4 tests/data/two_body.txt 0.01 0
+for order in 0 7 1.5; do
+    expect_failure --solver fmm --order "$order" tests/data/two_body.txt 0.01 0
+done
 
 printf 'All CLI tests passed.\n'

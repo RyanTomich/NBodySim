@@ -1,7 +1,7 @@
 #include "solver_internal.h"
 #include <string.h>
 
-static const SolverDescriptor *const registry[] = {&direct_solver, &approximate_solver};
+static const SolverDescriptor *const registry[] = {&direct_solver, &barnes_hut_solver, &fmm_solver};
 
 size_t solver_count(void)
 {
@@ -43,7 +43,8 @@ bool solver_create(Solver *solver, const char *name, size_t count,
         *solver = (Solver){descriptor->acceleration, context, descriptor};
         return true;
     }
-    *error = "Unknown solver.";
+    *error = strcmp(name, "approximate") == 0
+           ? "Solver approximate was renamed to barnes-hut." : "Unknown solver.";
     return false;
 }
 

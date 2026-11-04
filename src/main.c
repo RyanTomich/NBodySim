@@ -13,23 +13,24 @@ int main(int argc, char **argv)
     const char *positional[3];
     size_t positional_count = 0;
     const char *solver_name = "direct";
-    const char *theta = NULL;
-    bool solver_set = false, theta_set = false;
+    SolverOption options[2];
+    size_t option_count = 0;
+    bool solver_set = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--solver") == 0) {
             if (solver_set || ++i == argc) {
-                fprintf(stderr, "Expected --solver direct|approximate once.\n");
+                fprintf(stderr, "Expected --solver direct|barnes-hut|fmm once.\n");
                 return EXIT_FAILURE;
             }
             solver_name = argv[i];
             solver_set = true;
-        } else if (strcmp(argv[i], "--theta") == 0) {
-            if (theta_set || ++i == argc) {
-                fprintf(stderr, "Expected --theta with a finite nonnegative value once.\n");
+        } else if (strcmp(argv[i], "--theta") == 0 || strcmp(argv[i], "--order") == 0) {
+            const char *name = argv[i] + 2;
+            if (++i == argc || option_count == 2) {
+                fprintf(stderr, "Invalid solver options.\n");
                 return EXIT_FAILURE;
             }
-            theta = argv[i];
-            theta_set = true;
+            options[option_count++] = (SolverOption){name, argv[i]};
         } else if (positional_count < 3) {
             positional[positional_count++] = argv[i];
         } else {
@@ -38,7 +39,7 @@ int main(int argc, char **argv)
         }
     }
     if (positional_count != 3) {
-        fprintf(stderr, "Usage: %s [--solver direct|approximate] [--theta VALUE] INPUT DT STEPS\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--solver direct|barnes-hut|fmm] [--theta VALUE | --order P] INPUT DT STEPS\n", argv[0]);
         return EXIT_FAILURE;
     }
     if (!parse_double(positional[1], &dt) || dt <= 0.0 || !parse_size(positional[2], &steps)) {
@@ -62,9 +63,8 @@ int main(int argc, char **argv)
 
     Solver solver;
     const char *error;
-    SolverOption option = {"theta", theta};
     if (!solver_create(&solver, solver_name, simulation_view(simulation).count,
-                       &option, theta_set ? 1 : 0, &error)) {
+                       options, option_count, &error)) {
         fprintf(stderr, "%s\n", error);
         simulation_destroy(simulation);
         return EXIT_FAILURE;

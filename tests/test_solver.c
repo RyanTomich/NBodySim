@@ -16,14 +16,14 @@ static void test_preparation_errors(void)
     assert(error && !solver.descriptor && !solver.context && !solver.acceleration);
     solver_destroy(&solver);
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
-        assert(!solver_create(&solver, "approximate", 1, &bad[i], 1, &error));
+        assert(!solver_create(&solver, "barnes-hut", 1, &bad[i], 1, &error));
         assert(error && !solver.context && !solver.descriptor);
         solver_destroy(&solver);
     }
     SolverOption duplicate[] = {{"theta", "0"}, {"theta", "1"}};
-    assert(!solver_create(&solver, "approximate", 1, duplicate, 2, &error));
+    assert(!solver_create(&solver, "barnes-hut", 1, duplicate, 2, &error));
     assert(!solver_create(&solver, "direct", 1, duplicate, 1, &error));
-    assert(!solver_create(&solver, "approximate", SIZE_MAX, NULL, 0, &error));
+    assert(!solver_create(&solver, "barnes-hut", SIZE_MAX, NULL, 0, &error));
     assert(!solver.context && !solver.descriptor);
     solver_destroy(&solver);
     assert(solver_name_at(solver_count()) == NULL);
@@ -48,7 +48,7 @@ static void test_configuration_contract(void)
     const size_t expected[] = {0, 2, 0, 1};
     Solver solver;
     const char *error;
-    assert(solver_create(&solver, "approximate", 3, options, 4, &error));
+    assert(solver_create(&solver, "barnes-hut", 3, options, 4, &error));
     for (size_t i = 0; i < 4; ++i) {
         MetadataCheck check = {.name = options[i].name};
         solver_settings(&solver, find_metadata, &check);
@@ -63,7 +63,7 @@ static void test_configuration_contract(void)
     SolverOption invalid[] = {{"bucket_capacity", "0"}, {"max_depth", "-1"},
                              {"node_capacity", "-1"}};
     for (size_t i = 0; i < 3; ++i) {
-        assert(!solver_create(&solver, "approximate", 3, &invalid[i], 1, &error));
+        assert(!solver_create(&solver, "barnes-hut", 3, &invalid[i], 1, &error));
         solver_destroy(&solver);
     }
 }
@@ -141,6 +141,43 @@ static void test_registered_solver_contract(void)
     }
 }
 
+static void test_fmm_cutoff_settings(void)
+{
+    /* The default and explicit order four select the same optimization. */
+    const char *orders[] = {NULL, "1", "2", "3", "4", "5", "6"};
+    for (size_t i = 0; i < sizeof(orders) / sizeof(orders[0]); ++i) {
+        Solver solver;
+        const char *error;
+        SolverOption order = {"order", orders[i]};
+        assert(solver_create(&solver, "fmm", 1, &order, orders[i] ? 1 : 0, &error));
+        MetadataCheck cutoff = {.name = "direct_pair_cutoff"};
+        solver_settings(&solver, find_metadata, &cutoff);
+        assert(cutoff.found && cutoff.value.type == METADATA_SIZE);
+        assert(cutoff.value.value.size == (i == 0 || i == 4 ? 128u : 0u));
+        solver_destroy(&solver);
+    }
+}
+
+static void test_fmm_distant_groups(void)
+{
+    /* Bodies at the same site exert zero acceleration on each other.
+     * All of the reference force therefore comes from the other two sites. */
+    ReferenceBody bodies[CLOUD_SIZE];
+    const Vec3 sites[] = {{0, 0, 0}, {16, 9, -5}, {-4, 13, 21}};
+    const size_t counts[] = {57, 43, 29};
+    size_t count = 0;
+    for (size_t site = 0; site < 3; ++site) {
+        for (size_t j = 0; j < counts[site]; ++j) {
+            bodies[count++] = (ReferenceBody){1 + (double)(j % 3), sites[site], {0}, {0}};
+        }
+    }
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "fmm", count, NULL, 0, &error));
+    simulation_destroy(check_force(&solver, bodies, count, 0.01));
+    solver_destroy(&solver);
+}
+
 static void test_gravity_accuracy(void)
 {
     /* Known Newtonian answer anchors the independent reference's normalization. */
@@ -150,7 +187,7 @@ static void test_gravity_accuracy(void)
     assert_close(exact[0].x, 0.75, 0);
     assert_close(exact[1].x, -0.5, 0);
 
-    const char *names[] = {"direct", "approximate", "approximate", "approximate", "approximate"};
+    const char *names[] = {"direct", "barnes-hut", "barnes-hut", "barnes-hut", "barnes-hut"};
     const SolverOption options[] = {{0}, {"theta", "0"}, {"node_capacity", "1"},
                                     {"max_depth", "0"}, {"bucket_capacity", "256"}};
     const size_t sizes[] = {2, 7, 33, CLOUD_SIZE};
@@ -173,28 +210,28 @@ static void test_gravity_accuracy(void)
         }
     }
     /* A fixed regression budget for this cloud, not a universal theta error bound. */
-    Solver approximate;
+    Solver barnes_hut;
     const char *error;
     fill_cloud(bodies);
     SolverOption opening = {"theta", "0.8"};
-    assert(solver_create(&approximate, "approximate", CLOUD_SIZE, &opening, 1, &error));
-    simulation_destroy(check_force(&approximate, bodies, CLOUD_SIZE, 0.02));
+    assert(solver_create(&barnes_hut, "barnes-hut", CLOUD_SIZE, &opening, 1, &error));
+    simulation_destroy(check_force(&barnes_hut, bodies, CLOUD_SIZE, 0.02));
     MetadataCheck calls = {.name = "calls"};
-    solver_diagnostics(&approximate, find_metadata, &calls);
+    solver_diagnostics(&barnes_hut, find_metadata, &calls);
     assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 1);
     MetadataCheck aggregates = {.name = "aggregate_evaluations"};
-    solver_diagnostics(&approximate, find_metadata, &aggregates);
+    solver_diagnostics(&barnes_hut, find_metadata, &aggregates);
     assert(aggregates.found && aggregates.value.type == METADATA_SIZE);
     assert(aggregates.value.value.size > 0); /* The approximation was exercised. */
-    solver_destroy(&approximate);
+    solver_destroy(&barnes_hut);
     /* Loose opening must still exclude the target's own mass. */
     const ReferenceBody separated[] = {{1, {0,0,0}, {0}, {0}},
                                        {2, {10,0,0}, {0}, {0}},
                                        {3, {11,0,0}, {0}, {0}}};
     SolverOption loose[] = {{"theta", "100"}, {"bucket_capacity", "1"}};
-    assert(solver_create(&approximate, "approximate", 3, loose, 2, &error));
-    simulation_destroy(check_force(&approximate, separated, 3, 0.01));
-    solver_destroy(&approximate);
+    assert(solver_create(&barnes_hut, "barnes-hut", 3, loose, 2, &error));
+    simulation_destroy(check_force(&barnes_hut, separated, 3, 0.01));
+    solver_destroy(&barnes_hut);
 
 }
 
@@ -207,7 +244,7 @@ static void test_fallback_contract(void)
                              {1e308, {2e100,0,0}, {0}, {0}}};
     Solver solver;
     const char *error;
-    assert(solver_create(&solver, "approximate", 3, NULL, 0, &error));
+    assert(solver_create(&solver, "barnes-hut", 3, NULL, 0, &error));
     simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
     MetadataCheck fallback = {.name = "aggregate_fallbacks"};
     solver_diagnostics(&solver, find_metadata, &fallback);
@@ -253,6 +290,8 @@ void test_solver(void)
     test_preparation_errors();
     test_configuration_contract();
     test_registered_solver_contract();
+    test_fmm_cutoff_settings();
+    test_fmm_distant_groups();
     test_gravity_accuracy();
     test_fallback_contract();
 }
