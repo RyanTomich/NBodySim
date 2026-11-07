@@ -24,6 +24,56 @@ Vec3 gravity(const SimulationView *state, size_t target, size_t source)
     };
 }
 
+Vec3 gravity_accumulate_sources(const SimulationView *state, size_t target,
+                                const size_t *indices, size_t begin, size_t end,
+                                Vec3 sum)
+{
+    for (size_t p = begin; p < end; ++p) {
+        size_t source = indices[p];
+        if (source == target) {
+            continue;
+        }
+        Vec3 contribution = gravity(state, target, source);
+        sum.x += contribution.x;
+        sum.y += contribution.y;
+        sum.z += contribution.z;
+    }
+    return sum;
+}
+
+/* Incremental weighted means avoid forming mass * position. */
+bool gravity_monopole_add(GravityMonopole *monopole, double mass, Vec3 position)
+{
+    double total = monopole->mass + mass;
+    if (!isfinite(total) || mass <= 0.0) {
+        return false;
+    }
+    if (monopole->mass == 0.0) {
+        monopole->center_of_mass = position;
+    } else {
+        double fraction = mass / total;
+        monopole->center_of_mass.x += fraction * (position.x - monopole->center_of_mass.x);
+        monopole->center_of_mass.y += fraction * (position.y - monopole->center_of_mass.y);
+        monopole->center_of_mass.z += fraction * (position.z - monopole->center_of_mass.z);
+    }
+    monopole->mass = total;
+    return isfinite(monopole->center_of_mass.x) && isfinite(monopole->center_of_mass.y)
+        && isfinite(monopole->center_of_mass.z);
+}
+
+Vec3 gravity_monopole_acceleration(const GravityMonopole *monopole, Vec3 target)
+{
+    Vec3 displacement = {monopole->center_of_mass.x - target.x,
+                         monopole->center_of_mass.y - target.y,
+                         monopole->center_of_mass.z - target.z};
+    double distance = hypot(hypot(displacement.x, displacement.y), displacement.z);
+    /* Equivalent to M * displacement / r^3 without explicitly cubing r. */
+    double scale = (monopole->mass / distance) / distance;
+    return (Vec3){scale * (displacement.x / distance),
+                  scale * (displacement.y / distance),
+                  scale * (displacement.z / distance)};
+}
+
 void gravity_accelerations(const SimulationView *state, double *restrict next_ax,
                            double *restrict next_ay, double *restrict next_az)
 {

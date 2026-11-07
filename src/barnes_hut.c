@@ -24,6 +24,7 @@ typedef struct {
 typedef struct {
     BarnesHutConfig config;
     Octree tree;
+    GravityMonopole *monopoles;
     bool bounds_fallback;
     bool aggregate_fallback;
     size_t source_node_visits; /* Source nodes visited during group discovery. */
@@ -42,44 +43,27 @@ static BarnesHutConfig barnes_hut_default_config(void)
     };
 }
 
-/* Incremental weighted means avoid forming mass * position. */
-static bool add_mass(OctreeNode *node, double mass, Vec3 position)
-{
-    double total = node->mass + mass;
-    if (!isfinite(total) || mass <= 0.0) {
-        return false;
-    }
-    if (node->mass == 0.0) {
-        node->center_of_mass = position;
-    } else {
-        double fraction = mass / total;
-        node->center_of_mass.x += fraction * (position.x - node->center_of_mass.x);
-        node->center_of_mass.y += fraction * (position.y - node->center_of_mass.y);
-        node->center_of_mass.z += fraction * (position.z - node->center_of_mass.z);
-    }
-    node->mass = total;
-    return isfinite(node->center_of_mass.x) && isfinite(node->center_of_mass.y)
-        && isfinite(node->center_of_mass.z);
-}
-
 static bool aggregate_tree(const SimulationView *state, BarnesHutWorkspace *workspace)
 {
+    memset(workspace->monopoles, 0,
+           workspace->tree.node_count * sizeof(*workspace->monopoles));
     /* Children follow their parents in the pool; visit them first. */
     for (size_t n = workspace->tree.node_count; n-- > 0;) {
-        OctreeNode *node = &workspace->tree.nodes[n];
+        const OctreeNode *node = &workspace->tree.nodes[n];
+        GravityMonopole *monopole = &workspace->monopoles[n];
         if (node->is_leaf) {
             for (size_t p = node->begin; p < node->end; ++p) {
                 size_t i = workspace->tree.indices[p];
-                if (!add_mass(node, state->w[i],
-                              (Vec3){state->x[i], state->y[i], state->z[i]})) {
+                if (!gravity_monopole_add(monopole, state->w[i],
+                                          (Vec3){state->x[i], state->y[i], state->z[i]})) {
                     return false;
                 }
             }
         } else {
             for (size_t c = 0; c < 8; ++c) {
                 if (node->children[c] != SIZE_MAX) {
-                    const OctreeNode *child = &workspace->tree.nodes[node->children[c]];
-                    if (!add_mass(node, child->mass, child->center_of_mass)) {
+                    const GravityMonopole *child = &workspace->monopoles[node->children[c]];
+                    if (!gravity_monopole_add(monopole, child->mass, child->center_of_mass)) {
                         return false;
                     }
                 }
@@ -87,15 +71,6 @@ static bool aggregate_tree(const SimulationView *state, BarnesHutWorkspace *work
         }
     }
     return true;
-}
-
-static Vec3 point_mass_acceleration(Vec3 displacement, double mass, double distance)
-{
-    /* Equivalent to M * displacement / r^3 without explicitly cubing r. */
-    double scale = (mass / distance) / distance;
-    return (Vec3){scale * (displacement.x / distance),
-                  scale * (displacement.y / distance),
-                  scale * (displacement.z / distance)};
 }
 
 typedef struct {
@@ -122,14 +97,14 @@ static TargetBounds compute_target_bounds(const SimulationView *state,
     return bounds;
 }
 
-static bool accept_source(const OctreeNode *source, const TargetBounds *bounds,
-                          double theta)
+static bool accept_source(const OctreeNode *source, const GravityMonopole *monopole,
+                          const TargetBounds *bounds, double theta)
 {
     if (theta == 0.0) {
         return false;
     }
-    const double center[] = {source->center_of_mass.x, source->center_of_mass.y,
-                             source->center_of_mass.z};
+    const double center[] = {monopole->center_of_mass.x, monopole->center_of_mass.y,
+                             monopole->center_of_mass.z};
     double squared_distance = 0.0;
     double far_distance = 0.0;
     for (size_t axis = 0; axis < 3; ++axis) {
@@ -158,7 +133,8 @@ static void collect_sources(BarnesHutWorkspace *workspace, size_t index,
     const OctreeNode *node = &workspace->tree.nodes[index];
     ++workspace->source_node_visits;
     bool disjoint = node->end <= group->begin || group->end <= node->begin;
-    if (node->is_leaf || (disjoint && accept_source(node, bounds, workspace->config.theta))) {
+    if (node->is_leaf || (disjoint && accept_source(node, &workspace->monopoles[index],
+                                                  bounds, workspace->config.theta))) {
         /* Disjoint, nonempty source ranges bound the list length by count. */
         assert(*length < workspace->tree.count);
         workspace->tree.scratch[(*length)++] = index;
@@ -182,23 +158,14 @@ static void evaluate_group(const SimulationView *state, double *ax, double *ay,
         for (size_t entry = 0; entry < length; ++entry) {
             const OctreeNode *node = &workspace->tree.nodes[sources[entry]];
             if (node->is_leaf) {
-                for (size_t q = node->begin; q < node->end; ++q) {
-                    size_t source = workspace->tree.indices[q];
-                    if (source == target) {
-                        continue;
-                    }
-                    Vec3 contribution = gravity(state, target, source);
-                    sum.x += contribution.x;
-                    sum.y += contribution.y;
-                    sum.z += contribution.z;
-                    ++workspace->direct_evaluations;
-                }
+                sum = gravity_accumulate_sources(state, target, workspace->tree.indices,
+                                                 node->begin, node->end, sum);
+                workspace->direct_evaluations += (node->end - node->begin)
+                                              - (node->begin <= p && p < node->end);
             } else {
-                Vec3 displacement = {node->center_of_mass.x - state->x[target],
-                                     node->center_of_mass.y - state->y[target],
-                                     node->center_of_mass.z - state->z[target]};
-                double distance = hypot(hypot(displacement.x, displacement.y), displacement.z);
-                Vec3 contribution = point_mass_acceleration(displacement, node->mass, distance);
+                const GravityMonopole *monopole = &workspace->monopoles[sources[entry]];
+                Vec3 contribution = gravity_monopole_acceleration(monopole,
+                    (Vec3){state->x[target], state->y[target], state->z[target]});
                 sum.x += contribution.x;
                 sum.y += contribution.y;
                 sum.z += contribution.z;
@@ -285,6 +252,13 @@ static bool barnes_hut_create(void **context, size_t count, const SolverOption *
         *error = "Could not allocate Barnes-Hut workspace.";
         return false;
     }
+    if (workspace->tree.node_capacity > SIZE_MAX / sizeof(*workspace->monopoles) ||
+        !(workspace->monopoles = malloc(workspace->tree.node_capacity * sizeof(*workspace->monopoles)))) {
+        octree_destroy(&workspace->tree);
+        free(workspace);
+        *error = "Could not allocate Barnes-Hut workspace.";
+        return false;
+    }
     workspace->config = config;
     *context = workspace;
     return true;
@@ -292,8 +266,10 @@ static bool barnes_hut_create(void **context, size_t count, const SolverOption *
 
 static void barnes_hut_destroy(void *context)
 {
-    octree_destroy(&((BarnesHutWorkspace *)context)->tree);
-    free(context);
+    BarnesHutWorkspace *workspace = context;
+    octree_destroy(&workspace->tree);
+    free(workspace->monopoles);
+    free(workspace);
 }
 
 static void barnes_hut_settings(const void *context, MetadataVisitor visit, void *user)

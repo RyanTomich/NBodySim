@@ -434,7 +434,7 @@ benchmark results are unchanged.
 ## State, integration, and solver interfaces
 
 Public headers describe contracts; `*_internal.h` headers describe private
-representations for implementations and focused unit tests.
+representations for implementations. Tests use public headers only.
 
 - `nbody.h`: opaque state ownership, borrowed array views, state copying and
   validation, and the whole-system acceleration callback used by integration.
@@ -499,6 +499,33 @@ needed. New CLI option spellings require explicit CLI support; the C preparation
 interface already accepts named backend options.
 
 ### Numerical implementations
+
+Gravity calculations and spatial traversal have separate internal boundaries.
+`gravity.c` owns particle interactions, indexed source-range accumulation,
+positive-mass monopole construction/evaluation, and the optimized whole-system
+direct kernel. Both tree solvers use those source-range and fallback operations.
+The direct kernel retains its symmetric unordered-pair optimization; tree source
+ranges retain their directed evaluation order.
+
+The octree stores geometry and particle ranges. Barnes–Hut owns a separate array
+of `GravityMonopole` summaries, cleared and rebuilt on every evaluation. FMM owns
+its moment and local-expansion arrays. All storage is allocated during solver
+preparation and reused; no particle-state pointers are retained between calls.
+
+FMM keeps Cartesian term preparation, polynomial shifts, and traversal in
+`fmm.c`. The private `laplace.c` module owns the positive `1/r` Taylor recurrence,
+distance scaling, and multipole-to-local contraction, including the generated
+order-four specialization. Its inputs are term tables, moments, cell scales,
+normalized displacement and distance, and scratch/output arrays; it does not
+depend on particle state or the octree. Regenerate the specialization with
+`python3 generate_fmm_order4.py > src/laplace_order4_internal.h`.
+
+Gravity supplies one source component, mass (`w`). Its FMM field readout takes
+the positive gradient of the positive `1/r` expansion; this field is already
+acceleration, so target response requires no extra buffer or pass. Source
+weighting and field readout are the extension points for future interactions.
+There is currently no selectable physics model, charge storage, or magnetic
+interaction; the public API and instance format remain gravity-specific.
 
 Each Barnes–Hut call rebuilds a bounded octree without allocation, accumulates
 mass and center of mass from leaves upward, and discovers one shared source
@@ -640,9 +667,10 @@ detect numerical overflow during evolution.
 
 - `src/nbody.h` and `src/nbody.c`: array types, callback, and serial simulation.
 - `src/state.c`: one-time allocation and read-only array views.
-- `src/gravity.c`: optimized direct gravity and its solver descriptor.
+- `src/gravity.c`: gravity kernels, mass monopoles, and the direct solver descriptor.
 - `src/barnes_hut.c`: Barnes–Hut solver and private workspace lifecycle.
 - `src/fmm.c` implements the fast multipole solver. Both tree solvers use `src/octree.c`.
+- `src/laplace.c`: generic and generated order-four `1/r` translations, using private Cartesian term tables.
 - `src/solver.h`, `src/solver.c`: shared lifecycle, metadata, and static registry.
 - `src/io.h` and `src/io.c`: text input/output and numeric parsing.
 - `src/main.c`: command-line arguments and solver preparation.
@@ -661,6 +689,15 @@ Direct and full-opening results are compared to an independent Newtonian referen
 with rounding tolerance. A fixed cloud also checks approximate accuracy with a
 scaled L2 budget `||error|| <= 0.02 * (1 + ||reference||)` at theta 0.8; this is
 not a universal theta error guarantee. Public diagnostics verify that aggregation and fallback were exercised.
+All six FMM orders are checked for small-state contracts, approximation reuse,
+and fallback/recovery. A 1,000-body, ten-step CLI regression compares all backends
+against direct, including separate position, velocity, and acceleration budgets
+for default Barnes–Hut and FMM. It does not require monotonic accuracy across FMM
+orders, whose tree settings differ. To additionally compare every backend against
+a saved executable built before a refactor, run
+`NBODY_BASELINE_APP=/absolute/path/to/saved-app make test`; the comparison uses
+`||difference|| <= 1e-12 * (1 + ||baseline||)` for each state vector group. Keep
+the baseline binary outside `build/` if cleaning between compiler settings.
 
 Tests do not prescribe tree shape, node counts, traversal order, pointer identity,
 scratch layouts, or bitwise agreement between numerical implementations. Such

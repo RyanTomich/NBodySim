@@ -158,11 +158,10 @@ static void test_fmm_cutoff_settings(void)
     }
 }
 
-static void test_fmm_distant_groups(void)
+static void fill_distant_groups(ReferenceBody *bodies)
 {
     /* Bodies at the same site exert zero acceleration on each other.
      * All of the reference force therefore comes from the other two sites. */
-    ReferenceBody bodies[CLOUD_SIZE];
     const Vec3 sites[] = {{0, 0, 0}, {16, 9, -5}, {-4, 13, 21}};
     const size_t counts[] = {57, 43, 29};
     size_t count = 0;
@@ -171,10 +170,17 @@ static void test_fmm_distant_groups(void)
             bodies[count++] = (ReferenceBody){1 + (double)(j % 3), sites[site], {0}, {0}};
         }
     }
+    assert(count == CLOUD_SIZE);
+}
+
+static void test_fmm_distant_groups(void)
+{
+    ReferenceBody bodies[CLOUD_SIZE];
+    fill_distant_groups(bodies);
     Solver solver;
     const char *error;
-    assert(solver_create(&solver, "fmm", count, NULL, 0, &error));
-    simulation_destroy(check_force(&solver, bodies, count, 0.01));
+    assert(solver_create(&solver, "fmm", CLOUD_SIZE, NULL, 0, &error));
+    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 0.01));
     solver_destroy(&solver);
 }
 
@@ -193,6 +199,66 @@ static void test_fmm_sparse_cells(void)
     assert(solver_create(&solver, "fmm", CLOUD_SIZE, NULL, 0, &error));
     simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 0.001));
     solver_destroy(&solver);
+}
+
+static void test_fmm_order_contract(void)
+{
+    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
+    ReferenceBody bodies[CLOUD_SIZE];
+    fill_cloud(bodies);
+    for (size_t order = 0; order < sizeof(orders) / sizeof(orders[0]); ++order) {
+        for (size_t count = 0; count <= 3; ++count) {
+            Solver solver;
+            const char *error;
+            SolverOption option = {"order", orders[order]};
+            assert(solver_create(&solver, "fmm", count, &option, 1, &error));
+            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            solver_destroy(&solver);
+        }
+    }
+}
+
+static void test_tree_summary_reuse(void)
+{
+    /* These fixed fixtures exercise approximations, including order four's
+     * larger leaves. Budgets are fixture-specific, not general error bounds. */
+    const char *orders[] = {NULL, "1", "2", "3", "4", "5", "6"};
+    for (size_t variant = 0; variant < sizeof(orders) / sizeof(orders[0]); ++variant) {
+        ReferenceBody bodies[CLOUD_SIZE];
+        bool fmm = variant != 0;
+        if (variant == 4) {
+            fill_distant_groups(bodies);
+        } else {
+            fill_cloud(bodies);
+        }
+        double tolerance = variant == 4 ? 0.01 : 0.001;
+        Solver solver;
+        const char *error;
+        SolverOption option = {"order", orders[variant]};
+        assert(solver_create(&solver, fmm ? "fmm" : "barnes-hut", CLOUD_SIZE,
+                             &option, fmm ? 1 : 0, &error));
+        Simulation *previous = check_force(&solver, bodies, CLOUD_SIZE, tolerance);
+        ReferenceBody before[CLOUD_SIZE];
+        memcpy(before, bodies, sizeof(before));
+        MetadataCheck approximations = {.name = fmm ? "translations" : "aggregate_evaluations"};
+        solver_diagnostics(&solver, find_metadata, &approximations);
+        assert(approximations.found && approximations.value.type == METADATA_SIZE);
+        assert(approximations.value.value.size > 0);
+
+        /* Rotate and translate the geometry, and change the source strengths.
+         * Keep the old allocation alive to catch retained input pointers. */
+        for (size_t i = 0; i < CLOUD_SIZE; ++i) {
+            bodies[i].w *= 2;
+            Vec3 point = bodies[i].position;
+            bodies[i].position = (Vec3){point.y + 100, point.z - 20, point.x + 5};
+        }
+        simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, tolerance));
+        for (size_t i = 0; i < CLOUD_SIZE; ++i) {
+            assert_body(body_at(previous, i), before[i], 0);
+        }
+        simulation_destroy(previous);
+        solver_destroy(&solver);
+    }
 }
 
 static void test_gravity_accuracy(void)
@@ -252,7 +318,7 @@ static void test_gravity_accuracy(void)
 
 }
 
-static void test_fallback_contract(void)
+static void check_fallback_contract(const char *name, const SolverOption *option)
 {
     /* Overflow in aggregate mass must fall back to direct evaluation and recover
      * on a later ordinary call. All expected accelerations remain representable. */
@@ -261,9 +327,10 @@ static void test_fallback_contract(void)
                              {1e308, {2e100,0,0}, {0}, {0}}};
     Solver solver;
     const char *error;
-    assert(solver_create(&solver, "barnes-hut", 3, NULL, 0, &error));
+    bool fmm = strcmp(name, "fmm") == 0;
+    assert(solver_create(&solver, name, 3, option, option ? 1 : 0, &error));
     simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
-    MetadataCheck fallback = {.name = "aggregate_fallbacks"};
+    MetadataCheck fallback = {.name = fmm ? "direct_fallbacks" : "aggregate_fallbacks"};
     solver_diagnostics(&solver, find_metadata, &fallback);
     assert(fallback.found && fallback.value.type == METADATA_SIZE && fallback.value.value.size == 1);
     /* Unrepresentable bounds retain the direct solver's overflow behavior. */
@@ -286,9 +353,9 @@ static void test_fallback_contract(void)
                    || actual[axis][i] == expected[axis][i]);
         }
     }
-    MetadataCheck bounds = {.name = "bounds_fallbacks"};
+    MetadataCheck bounds = {.name = fmm ? "direct_fallbacks" : "bounds_fallbacks"};
     solver_diagnostics(&solver, find_metadata, &bounds);
-    assert(bounds.found && bounds.value.type == METADATA_SIZE && bounds.value.value.size == 1);
+    assert(bounds.found && bounds.value.type == METADATA_SIZE && bounds.value.value.size == (fmm ? 2u : 1u));
     solver_destroy(&direct);
     simulation_destroy(state);
     for (size_t i = 0; i < 3; ++i) {
@@ -299,6 +366,9 @@ static void test_fallback_contract(void)
     MetadataCheck calls = {.name = "calls"};
     solver_diagnostics(&solver, find_metadata, &calls);
     assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 3);
+    fallback.found = false;
+    solver_diagnostics(&solver, find_metadata, &fallback);
+    assert(fallback.found && fallback.value.value.size == (fmm ? 2u : 1u));
     solver_destroy(&solver);
 }
 
@@ -310,6 +380,13 @@ void test_solver(void)
     test_fmm_cutoff_settings();
     test_fmm_distant_groups();
     test_fmm_sparse_cells();
+    test_fmm_order_contract();
+    test_tree_summary_reuse();
     test_gravity_accuracy();
-    test_fallback_contract();
+    check_fallback_contract("barnes-hut", NULL);
+    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
+    for (size_t i = 0; i < sizeof(orders) / sizeof(orders[0]); ++i) {
+        SolverOption option = {"order", orders[i]};
+        check_fallback_contract("fmm", &option);
+    }
 }
