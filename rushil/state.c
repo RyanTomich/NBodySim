@@ -1,0 +1,55 @@
+#include "state_internal.h"
+#include <stdint.h>
+#include <stdlib.h>
+
+bool simulation_create(Simulation **result, size_t count)
+{
+    *result = NULL;
+    if (count > (SIZE_MAX - sizeof(Simulation)) / (10 * sizeof(double))) {
+        return false;
+    }
+    Simulation *simulation = malloc(sizeof(*simulation) + 10 * count * sizeof(double));
+    if (!simulation) {
+        return false;
+    }
+    *result = simulation;
+    if (count == 0) {
+        *simulation = (Simulation){0};
+        return true;
+    }
+    double *storage = simulation->storage;
+    *simulation = (Simulation){
+        .count = count,
+        .w = storage, .x = storage + count, .y = storage + 2 * count,
+        .z = storage + 3 * count, .vx = storage + 4 * count,
+        .vy = storage + 5 * count, .vz = storage + 6 * count,
+        .ax = storage + 7 * count, .ay = storage + 8 * count,
+        .az = storage + 9 * count
+    };
+    return true;
+}
+
+SimulationView simulation_view(const Simulation *simulation)
+{
+    return (SimulationView){
+        .count = simulation->count,
+        .w = simulation->w, .x = simulation->x,
+        .y = simulation->y, .z = simulation->z,
+        .vx = simulation->vx, .vy = simulation->vy, .vz = simulation->vz,
+        .ax = simulation->ax, .ay = simulation->ay, .az = simulation->az
+    };
+}
+
+void simulation_destroy(Simulation *simulation)
+{
+    free(simulation);
+}
+
+MutableSimulationView simulation_mutable_view(Simulation *simulation)
+{
+    return (MutableSimulationView){
+        simulation->count, simulation->w, simulation->x, simulation->y, simulation->z,
+        simulation->vx, simulation->vy, simulation->vz,
+        simulation->ax, simulation->ay, simulation->az
+    };
+}
