@@ -15,7 +15,7 @@ typedef struct {
     union { size_t size; double real; bool boolean; const char *string; } value;
 } MetadataValue;
 /* Names and string values are borrowed for the duration of the visit. */
-typedef void (*MetadataVisitor)(const char *name, MetadataValue value, void *context);
+typedef void (*MetadataVisitor)(const char *name, MetadataValue value, void *visitor_context);
 
 typedef struct {
     AccelerationSolver acceleration;
@@ -36,7 +36,7 @@ bool solver_create(Solver *solver, const char *name, size_t count,
                    const SolverOption *options, size_t option_count, const char **error);
 void solver_destroy(Solver *solver); /* Accepts an empty handle; clears it. */
 /* Metadata requires a successfully prepared solver and a nonnull visitor. */
-void solver_settings(const Solver *solver, MetadataVisitor visit, void *context);
-void solver_diagnostics(const Solver *solver, MetadataVisitor visit, void *context);
+void solver_settings(const Solver *solver, MetadataVisitor visit, void *visitor_context);
+void solver_diagnostics(const Solver *solver, MetadataVisitor visit, void *visitor_context);
 
 #endif

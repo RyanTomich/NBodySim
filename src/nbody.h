@@ -37,9 +37,6 @@ typedef struct {
 
 /* Borrowed arrays; reacquire views after integration swaps accelerations. */
 MutableSimulationView simulation_mutable_view(Simulation *simulation);
-/* Copy logical state only. Equal counts required; self-copy is valid. */
-bool simulation_copy(Simulation *destination, const Simulation *source);
-bool simulation_is_finite(const Simulation *simulation);
 
 /* Fill all three count-element outputs without modifying state or allocating.
  * Outputs must be disjoint from each other and state. Context is caller-owned;

@@ -15,6 +15,15 @@ static void test_preparation_errors(void)
     assert(!solver_create(&solver, "missing", 1, NULL, 0, &error));
     assert(error && !solver.descriptor && !solver.context && !solver.acceleration);
     solver_destroy(&solver);
+    assert(!solver_create(&solver, "direct", 1, NULL, 0, &error));
+    assert(error && !solver.descriptor && !solver.context && !solver.acceleration);
+    solver_destroy(&solver);
+    size_t n2_count = 0;
+    for (size_t i = 0; i < solver_count(); ++i) {
+        assert(strcmp(solver_name_at(i), "direct") != 0);
+        n2_count += strcmp(solver_name_at(i), "n2") == 0;
+    }
+    assert(n2_count == 1);
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
         assert(!solver_create(&solver, "barnes-hut", 1, &bad[i], 1, &error));
         assert(error && !solver.context && !solver.descriptor);
@@ -22,7 +31,7 @@ static void test_preparation_errors(void)
     }
     SolverOption duplicate[] = {{"theta", "0"}, {"theta", "1"}};
     assert(!solver_create(&solver, "barnes-hut", 1, duplicate, 2, &error));
-    assert(!solver_create(&solver, "direct", 1, duplicate, 1, &error));
+    assert(!solver_create(&solver, "n2", 1, duplicate, 1, &error));
     assert(!solver_create(&solver, "barnes-hut", SIZE_MAX, NULL, 0, &error));
     assert(!solver.context && !solver.descriptor);
     solver_destroy(&solver);
@@ -31,9 +40,9 @@ static void test_preparation_errors(void)
 
 typedef struct { const char *name; MetadataValue value; bool found; } MetadataCheck;
 
-static void find_metadata(const char *name, MetadataValue value, void *context)
+static void find_metadata(const char *name, MetadataValue value, void *visitor_context)
 {
-    MetadataCheck *check = context;
+    MetadataCheck *check = visitor_context;
     if (strcmp(name, check->name) == 0) {
         assert(!check->found); /* Keys must be unambiguous. */
         check->value = value;
@@ -270,7 +279,7 @@ static void test_gravity_accuracy(void)
     assert_close(exact[0].x, 0.75, 0);
     assert_close(exact[1].x, -0.5, 0);
 
-    const char *names[] = {"direct", "barnes-hut", "barnes-hut", "barnes-hut", "barnes-hut"};
+    const char *names[] = {"n2", "barnes-hut", "barnes-hut", "barnes-hut", "barnes-hut"};
     const SolverOption options[] = {{0}, {"theta", "0"}, {"node_capacity", "1"},
                                     {"max_depth", "0"}, {"bucket_capacity", "256"}};
     const size_t sizes[] = {2, 7, 33, CLOUD_SIZE};
@@ -333,7 +342,7 @@ static void check_fallback_contract(const char *name, const SolverOption *option
     MetadataCheck fallback = {.name = fmm ? "direct_fallbacks" : "aggregate_fallbacks"};
     solver_diagnostics(&solver, find_metadata, &fallback);
     assert(fallback.found && fallback.value.type == METADATA_SIZE && fallback.value.value.size == 1);
-    /* Unrepresentable bounds retain the direct solver's overflow behavior. */
+    /* Unrepresentable bounds retain the n2 solver's overflow behavior. */
     bodies[0].position.x = -1e308;
     bodies[1].position.x = 0;
     bodies[2].position.x = 1e308;
@@ -342,11 +351,11 @@ static void check_fallback_contract(const char *name, const SolverOption *option
     }
     Simulation *state = from_bodies(bodies, 3);
     SimulationView view = simulation_view(state);
-    Solver direct;
-    assert(solver_create(&direct, "direct", 3, NULL, 0, &error));
+    Solver n2;
+    assert(solver_create(&n2, "n2", 3, NULL, 0, &error));
     double actual[3][3], expected[3][3];
     solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
-    direct.acceleration(&view, expected[0], expected[1], expected[2], direct.context);
+    n2.acceleration(&view, expected[0], expected[1], expected[2], n2.context);
     for (size_t axis = 0; axis < 3; ++axis) {
         for (size_t i = 0; i < 3; ++i) {
             assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
@@ -356,7 +365,7 @@ static void check_fallback_contract(const char *name, const SolverOption *option
     MetadataCheck bounds = {.name = fmm ? "direct_fallbacks" : "bounds_fallbacks"};
     solver_diagnostics(&solver, find_metadata, &bounds);
     assert(bounds.found && bounds.value.type == METADATA_SIZE && bounds.value.value.size == (fmm ? 2u : 1u));
-    solver_destroy(&direct);
+    solver_destroy(&n2);
     simulation_destroy(state);
     for (size_t i = 0; i < 3; ++i) {
         bodies[i].w = i + 1;

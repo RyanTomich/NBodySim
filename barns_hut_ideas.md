@@ -185,15 +185,15 @@ Use the existing runner for reproducible comparisons. The following commands
 describe proposed experiments. The author did not run them for this document:
 
 ```sh
-python3 bench/run.py timing tests/data/1000.txt \
+python3 bench/run.py timing bench/data/1000.txt \
   --dt 0.0001 --steps 100 --samples 30 --warmups 1 \
   --solver approximate --theta 0.5 --compare-direct
 
 # Linux with perf access. Increase steps if the profile has too few samples.
-python3 bench/run.py profile tests/data/1000.txt \
+python3 bench/run.py profile bench/data/1000.txt \
   --dt 0.0001 --steps 100 --solver approximate --theta 0.5
 
-python3 bench/run.py counters tests/data/1000.txt \
+python3 bench/run.py counters bench/data/1000.txt \
   --dt 0.0001 --steps 100 --solver approximate --theta 0.5 \
   --events cycles:u,instructions:u,branches:u,branch-misses:u,cache-references:u,cache-misses:u
 ```

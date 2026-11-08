@@ -1,4 +1,5 @@
 #include "io.h"
+#include "parse.h"
 
 #include <ctype.h>
 

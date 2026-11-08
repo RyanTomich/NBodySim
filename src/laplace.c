@@ -1,5 +1,43 @@
 #include "laplace_internal.h"
-#include "laplace_order4_internal.h"
+#include "generated/laplace_order4_internal.h"
+
+static int choose(int n, int k)
+{
+    int result = 1;
+    for (int i = 1; i <= k; ++i) {
+        result = result * (n - i + 1) / i;
+    }
+    return result;
+}
+
+void laplace_prepare_terms(CartesianTerms *terms)
+{
+    int index[CARTESIAN_MAX_ORDER + 1][CARTESIAN_MAX_ORDER + 1][CARTESIAN_MAX_ORDER + 1] = {0};
+    for (int d = 0; d <= (int)terms->order; ++d) {
+        for (int x = 0; x <= d; ++x) {
+            for (int y = 0; y <= d - x; ++y) {
+                int z = d - x - y, a = terms->terms++;
+                index[x][y][z] = a;
+                terms->degree[a] = d;
+                terms->exponent[a][0] = x;
+                terms->exponent[a][1] = y;
+                terms->exponent[a][2] = z;
+                terms->lower[a][0] = x ? index[x - 1][y][z] : -1;
+                terms->lower[a][1] = y ? index[x][y - 1][z] : -1;
+                terms->lower[a][2] = z ? index[x][y][z - 1] : -1;
+                for (int i = 0; i <= x; ++i) {
+                    for (int j = 0; j <= y; ++j) {
+                        for (int k = 0; k <= z; ++k) {
+                            terms->split[terms->splits++] =
+                                (CartesianSplit){a, index[i][j][k], index[x - i][y - j][z - k],
+                                                 choose(x, i) * choose(y, j) * choose(z, k)};
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 static void translation_kernel(const CartesianTerms *terms, const double unit[3], double *kernel)
 {

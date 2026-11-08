@@ -2,3 +2,6 @@
 /results/
 /plots/
 __pycache__/
+
+# Generated benchmark inputs; keep the curated 1000.txt instance tracked.
+/bench/data/instance-*.txt

@@ -1,5 +1,6 @@
 #include "laplace_internal.h"
 #include "gravity_internal.h"
+#include "n2_internal.h"
 #include "octree_internal.h"
 #include "parse.h"
 #include "solver_internal.h"
@@ -18,54 +19,16 @@ typedef struct {
     size_t calls, translations, direct_evaluations, capacity_limited_leaves, direct_fallbacks;
 } Fmm;
 
-static int choose(int n, int k)
+static void destroy(void *solver_context)
 {
-    int result = 1;
-    for (int i = 1; i <= k; ++i) {
-        result = result * (n - i + 1) / i;
-    }
-    return result;
-}
-
-static void prepare_terms(CartesianTerms *terms)
-{
-    int index[CARTESIAN_MAX_ORDER + 1][CARTESIAN_MAX_ORDER + 1][CARTESIAN_MAX_ORDER + 1] = {0};
-    for (int d = 0; d <= (int)terms->order; ++d) {
-        for (int x = 0; x <= d; ++x) {
-            for (int y = 0; y <= d - x; ++y) {
-                int z = d - x - y, a = terms->terms++;
-                index[x][y][z] = a;
-                terms->degree[a] = d;
-                terms->exponent[a][0] = x;
-                terms->exponent[a][1] = y;
-                terms->exponent[a][2] = z;
-                terms->lower[a][0] = x ? index[x - 1][y][z] : -1;
-                terms->lower[a][1] = y ? index[x][y - 1][z] : -1;
-                terms->lower[a][2] = z ? index[x][y][z - 1] : -1;
-                for (int i = 0; i <= x; ++i) {
-                    for (int j = 0; j <= y; ++j) {
-                        for (int k = 0; k <= z; ++k) {
-                            terms->split[terms->splits++] =
-                                (CartesianSplit){a, index[i][j][k], index[x - i][y - j][z - k],
-                                                 choose(x, i) * choose(y, j) * choose(z, k)};
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-static void destroy(void *context)
-{
-    Fmm *f = context;
+    Fmm *f = solver_context;
     octree_destroy(&f->tree);
     free(f->moments);
     free(f->locals);
     free(f);
 }
 
-static bool create(void **context, size_t count, const SolverOption *options, size_t option_count,
+static bool create(void **solver_context, size_t count, const SolverOption *options, size_t option_count,
                    const char **error)
 {
     size_t order = 4;
@@ -83,7 +46,7 @@ static bool create(void **context, size_t count, const SolverOption *options, si
     }
     f->expansion.order = order;
     f->direct_pair_cutoff = order == 4 ? 192 : 0;
-    prepare_terms(&f->expansion);
+    laplace_prepare_terms(&f->expansion);
     /* Allow spare nodes for sparse and clustered trees. Full leaves remain
      * valid even if subdivision exhausts this pool. */
     size_t capacity = count / 2 + 1;
@@ -100,7 +63,7 @@ static bool create(void **context, size_t count, const SolverOption *options, si
         destroy(f);
         return false;
     }
-    *context = f;
+    *solver_context = f;
     *error = NULL;
     return true;
 }
@@ -292,9 +255,9 @@ static bool downward_pass(Fmm *f, Field *field)
     return true;
 }
 
-static void evaluate(const SimulationView *state, double *ax, double *ay, double *az, void *context)
+static void evaluate(const SimulationView *state, double *ax, double *ay, double *az, void *solver_context)
 {
-    Fmm *f = context;
+    Fmm *f = solver_context;
     ++f->calls;
     if (!state->count) {
         return;
@@ -314,24 +277,24 @@ static void evaluate(const SimulationView *state, double *ax, double *ay, double
     }
     ++f->direct_fallbacks;
     f->direct_evaluations += state->count * (state->count - 1);
-    gravity_direct(state, ax, ay, az, NULL);
+    n2_accelerations(state, ax, ay, az);
 }
 
-static void settings(const void *context, MetadataVisitor visit, void *user)
+static void settings(const void *solver_context, MetadataVisitor visit, void *visitor_context)
 {
-    const Fmm *f = context;
-    visit("order", (MetadataValue){METADATA_SIZE, {.size = f->expansion.order}}, user);
-    visit("direct_pair_cutoff", (MetadataValue){METADATA_SIZE, {.size = f->direct_pair_cutoff}}, user);
+    const Fmm *f = solver_context;
+    visit("order", (MetadataValue){METADATA_SIZE, {.size = f->expansion.order}}, visitor_context);
+    visit("direct_pair_cutoff", (MetadataValue){METADATA_SIZE, {.size = f->direct_pair_cutoff}}, visitor_context);
     visit("bucket_capacity", (MetadataValue){METADATA_SIZE, {.size = f->tree.bucket_capacity}},
-          user);
-    visit("max_depth", (MetadataValue){METADATA_SIZE, {.size = f->tree.max_depth}}, user);
-    visit("node_capacity", (MetadataValue){METADATA_SIZE, {.size = f->tree.node_capacity}}, user);
+          visitor_context);
+    visit("max_depth", (MetadataValue){METADATA_SIZE, {.size = f->tree.max_depth}}, visitor_context);
+    visit("node_capacity", (MetadataValue){METADATA_SIZE, {.size = f->tree.node_capacity}}, visitor_context);
 }
 
-static void diagnostics(const void *context, MetadataVisitor visit, void *user)
+static void diagnostics(const void *solver_context, MetadataVisitor visit, void *visitor_context)
 {
-    const Fmm *f = context;
-#define REPORT(field) visit(#field, (MetadataValue){METADATA_SIZE, {.size = f->field}}, user)
+    const Fmm *f = solver_context;
+#define REPORT(field) visit(#field, (MetadataValue){METADATA_SIZE, {.size = f->field}}, visitor_context)
     REPORT(calls);
     REPORT(translations);
     REPORT(direct_evaluations);

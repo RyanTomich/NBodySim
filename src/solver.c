@@ -1,7 +1,7 @@
 #include "solver_internal.h"
 #include <string.h>
 
-static const SolverDescriptor *const registry[] = {&direct_solver, &barnes_hut_solver, &fmm_solver};
+static const SolverDescriptor *const registry[] = {&n2_solver, &barnes_hut_solver, &fmm_solver};
 
 size_t solver_count(void)
 {
@@ -31,16 +31,16 @@ bool solver_create(Solver *solver, const char *name, size_t count,
         if (strcmp(name, descriptor->name) != 0) {
             continue;
         }
-        void *context = NULL;
+        void *solver_context = NULL;
         if (descriptor->create) {
-            if (!descriptor->create(&context, count, options, option_count, error)) {
+            if (!descriptor->create(&solver_context, count, options, option_count, error)) {
                 return false;
             }
         } else if (option_count) {
             *error = "Solver does not accept options.";
             return false;
         }
-        *solver = (Solver){descriptor->acceleration, context, descriptor};
+        *solver = (Solver){descriptor->acceleration, solver_context, descriptor};
         return true;
     }
     *error = strcmp(name, "approximate") == 0
@@ -56,16 +56,16 @@ void solver_destroy(Solver *solver)
     *solver = (Solver){0};
 }
 
-void solver_settings(const Solver *solver, MetadataVisitor visit, void *context)
+void solver_settings(const Solver *solver, MetadataVisitor visit, void *visitor_context)
 {
     if (solver->descriptor->settings) {
-        solver->descriptor->settings(solver->context, visit, context);
+        solver->descriptor->settings(solver->context, visit, visitor_context);
     }
 }
 
-void solver_diagnostics(const Solver *solver, MetadataVisitor visit, void *context)
+void solver_diagnostics(const Solver *solver, MetadataVisitor visit, void *visitor_context)
 {
     if (solver->descriptor->diagnostics) {
-        solver->descriptor->diagnostics(solver->context, visit, context);
+        solver->descriptor->diagnostics(solver->context, visit, visitor_context);
     }
 }

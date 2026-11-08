@@ -1,5 +1,6 @@
 #include "solver.h"
 #include "io.h"
+#include "parse.h"
 #include "nbody.h"
 
 #include <stdio.h>
@@ -12,14 +13,14 @@ int main(int argc, char **argv)
     size_t steps;
     const char *positional[3];
     size_t positional_count = 0;
-    const char *solver_name = "direct";
+    const char *solver_name = "n2";
     SolverOption options[2];
     size_t option_count = 0;
     bool solver_set = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--solver") == 0) {
             if (solver_set || ++i == argc) {
-                fprintf(stderr, "Expected --solver direct|barnes-hut|fmm once.\n");
+                fprintf(stderr, "Expected --solver n2|barnes-hut|fmm once.\n");
                 return EXIT_FAILURE;
             }
             solver_name = argv[i];
@@ -39,7 +40,7 @@ int main(int argc, char **argv)
         }
     }
     if (positional_count != 3) {
-        fprintf(stderr, "Usage: %s [--solver direct|barnes-hut|fmm] [--theta VALUE | --order P] INPUT DT STEPS\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--solver n2|barnes-hut|fmm] [--theta VALUE | --order P] INPUT DT STEPS\n", argv[0]);
         return EXIT_FAILURE;
     }
     if (!parse_double(positional[1], &dt) || dt <= 0.0 || !parse_size(positional[2], &steps)) {

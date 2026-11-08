@@ -2,7 +2,6 @@
 #define NBODY_IO_H
 
 #include "nbody.h"
-#include "parse.h"
 
 #include <stdio.h>
 

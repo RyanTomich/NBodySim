@@ -1,0 +1,17 @@
+flowchart TD
+    M["main.c — CLI simulation orchestration"] --> IO["io.c / parse.c — state I/O and numeric parsing"]
+    M --> S["state.c — state ownership and views"]
+    M --> R["solver.c — backend lifecycle and metadata"]
+    M --> E["euler.c — forward Euler time stepping"]
+    E --> CB["AccelerationSolver — per-step gravity callback"]
+    CB --> N2["n2.c — direct all-pairs solver"]
+    CB --> BH["barnes_hut.c — monopole tree solver"]
+    CB --> F["fmm.c — fast multipole solver"]
+    BH -. fallback .-> N2
+    F -. fallback .-> N2
+    BH --> G["gravity.c — direct particle interactions"]
+    F --> G
+    BH --> O["octree.c — bounded spatial hierarchy"]
+    F --> O
+    F --> L["laplace.c — expansion tables and translation"]
+    L --> GEN["generated/laplace_order4_internal.h — unrolled order-4 translation"]

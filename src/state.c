@@ -1,8 +1,6 @@
 #include "state_internal.h"
-#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 
 bool simulation_create(Simulation **result, size_t count)
 {
@@ -55,39 +53,4 @@ MutableSimulationView simulation_mutable_view(Simulation *simulation)
         simulation->vx, simulation->vy, simulation->vz,
         simulation->ax, simulation->ay, simulation->az
     };
-}
-
-bool simulation_copy(Simulation *destination, const Simulation *source)
-{
-    if (destination->count != source->count) {
-        return false;
-    }
-    if (destination == source || source->count == 0) {
-        return true;
-    }
-    double *out[] = {destination->w, destination->x, destination->y, destination->z,
-                    destination->vx, destination->vy, destination->vz,
-                    destination->ax, destination->ay, destination->az};
-    const double *in[] = {source->w, source->x, source->y, source->z,
-                         source->vx, source->vy, source->vz,
-                         source->ax, source->ay, source->az};
-    for (size_t i = 0; i < 10; ++i) {
-        memcpy(out[i], in[i], source->count * sizeof(double));
-    }
-    return true;
-}
-
-bool simulation_is_finite(const Simulation *simulation)
-{
-    SimulationView view = simulation_view(simulation);
-    const double *fields[] = {view.w, view.x, view.y, view.z, view.vx, view.vy, view.vz,
-                             view.ax, view.ay, view.az};
-    for (size_t field = 0; field < 10; ++field) {
-        for (size_t i = 0; i < view.count; ++i) {
-            if (!isfinite(fields[field][i])) {
-                return false;
-            }
-        }
-    }
-    return true;
 }

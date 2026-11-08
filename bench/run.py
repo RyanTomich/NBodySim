@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Measure simulate_with_solver() and save results with the exact benchmark executable."""
+"""Build and run timing experiments, optionally compare accuracy, and save results.
+
+The C driver times only simulate_with_solver(); Python summarizes its samples.
+"""
 
 import argparse
 from contextlib import ExitStack
@@ -9,7 +12,6 @@ import json
 import math
 import os
 from pathlib import Path
-import platform
 import re
 import shutil
 import statistics
@@ -18,8 +20,6 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_EVENTS = "cycles:u,instructions:u,branches:u,branch-misses:u,cache-references:u,cache-misses:u"
-COUNTER_FIELDS = ["event", "value", "unit", "status", "event_runtime_ns", "running_percent"]
 
 
 def now():
@@ -123,18 +123,18 @@ def trajectory_errors(actual, reference):
     return rows
 
 
-def compare_direct(binary, instance, folder, modes, args):
-    """One ungated reference call per input, after all measurement modes finish."""
+def compare_n2(binary, instance, folder, args):
+    """Compare the timed final state with one unmeasured n2 reference run."""
     directory = folder / "reference"
     directory.mkdir()
-    status = {"solver": "direct", "steps": args.steps, "dt": args.dt,
+    status = {"solver": "n2", "steps": args.steps, "dt": args.dt,
               "started": now(), "status": "failed"}
     reference = None
     try:
         command = [binary, instance, str(args.dt), str(args.steps), "1", "0",
-                   "reference", directory / "final.txt", "direct"]
+                   "reference", directory / "final.txt", "n2"]
         if run_logged(command, directory):
-            raise RuntimeError("Direct reference failed; see reference/stderr.log.")
+            raise RuntimeError("n2 reference failed; see reference/stderr.log.")
         reference = read_state(directory / "final.txt")
         validate_bodies(reference, read_state(instance))
         status["status"] = "ok"
@@ -142,79 +142,20 @@ def compare_direct(binary, instance, folder, modes, args):
         status["error"] = str(error)
     status["finished"] = now()
     write_json(directory / "status.json", status)
-    failed = status["status"] != "ok"
-    for mode in modes:
-        comparison = {"solver": args.solver, "reference_solver": "direct",
-                      "started": now(), "status": "failed"}
-        try:
-            if status["status"] != "ok":
-                raise RuntimeError(status["error"])
-            rows = trajectory_errors(read_state(folder / mode / "final.txt"), reference)
-            write_csv(folder / mode / "error.csv", list(rows[0]), rows)
-            comparison["status"] = "ok"
-        except (OSError, ValueError, RuntimeError) as error:
-            comparison["error"] = str(error)
-            failed = True
-        comparison["finished"] = now()
-        write_json(folder / mode / "error-status.json", comparison)
-    return not failed
-
-
-def parse_counters(text):
-    """Parse perf stat -x ';' without mistaking process elapsed time for a counter."""
-    rows = []
-    for fields in csv.reader(text.splitlines(), delimiter=";"):
-        if not fields or fields[0].lstrip().startswith("#"):
-            continue
-        fields = [field.strip() for field in fields]
-        if len(fields) < 3 or not fields[2]:
-            continue
-        if any("seconds time elapsed" in field or field in ("seconds user", "seconds sys")
-               for field in fields):
-            continue
-        raw, unit, event = fields[:3]
-        try:
-            value = float(raw)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError
-            status = "ok"
-        except ValueError:
-            value = None
-            status = raw or "missing"
-        rows.append({"event": event, "value": value, "unit": unit, "status": status,
-                     "event_runtime_ns": fields[3] if len(fields) > 3 else "",
-                     "running_percent": fields[4] if len(fields) > 4 else ""})
-    return rows
-
-
-def counter_ratios(rows):
-    # Avoid merging different PMUs or deriving ratios from duplicate event rows.
-    def value(name):
-        matching = [row for row in rows if row["event"].split(":")[0] == name]
-        if len(matching) == 1 and matching[0]["status"] == "ok":
-            return matching[0]["value"]
-        return None
-
-    ratios = []
-    for name, numerator, denominator in (
-        ("ipc", "instructions", "cycles"),
-        ("branch_miss_rate", "branch-misses", "branches"),
-        ("cache_miss_rate", "cache-misses", "cache-references"),
-    ):
-        a, b = value(numerator), value(denominator)
-        result = a / b if a is not None and b is not None and b > 0 else None
-        ratios.append({"metric": name, "value": result,
-                       "unit": "instructions/cycle" if name == "ipc" else "fraction",
-                       "status": "ok" if result is not None else "unavailable"})
-    return ratios
-
-
-def perf_available():
-    if platform.system() != "Linux":
-        return "Linux perf is required for this mode; portable timing remains available."
-    if not shutil.which("perf"):
-        return "perf was not found. Install the Linux perf tools for this host's kernel."
-    return None
+    comparison = {"solver": args.solver, "reference_solver": "n2",
+                  "started": now(), "status": "failed"}
+    timing = folder / "timing"
+    try:
+        if status["status"] != "ok":
+            raise RuntimeError(status["error"])
+        rows = trajectory_errors(read_state(timing / "final.txt"), reference)
+        write_csv(timing / "error.csv", list(rows[0]), rows)
+        comparison["status"] = "ok"
+    except (OSError, ValueError, RuntimeError) as error:
+        comparison["error"] = str(error)
+    comparison["finished"] = now()
+    write_json(timing / "error-status.json", comparison)
+    return comparison["status"] == "ok"
 
 
 def solver_settings(binary, instance, solver, theta, order=None):
@@ -242,67 +183,33 @@ def driver_metadata(directory, status):
                 status["diagnostics"] = json.loads(line.split(": ", 1)[1])
 
 
-def collect(mode, binary, instance, directory, args):
+def collect_timing(binary, instance, directory, args):
+    """Run warmups and timing samples, then save per-step statistics and status."""
     directory.mkdir()
-    status = {"mode": mode, "solver": args.solver, "steps": args.steps, "dt": args.dt,
+    status = {"mode": "timing", "solver": args.solver, "steps": args.steps, "dt": args.dt,
               "started": now(), "status": "failed"}
     summary = None
-    theta = getattr(args, "theta", None)
+    theta = args.theta
     try:
-        status.update(solver_settings(binary, instance, args.solver, theta, getattr(args, "order", None)))
+        status.update(solver_settings(binary, instance, args.solver, theta, args.order))
         theta = status.get("theta")
-        if mode != "timing":
-            unavailable = perf_available()
-            if unavailable:
-                raise RuntimeError(unavailable)
-        samples = args.samples if mode == "timing" else 1
-        driver = [binary, instance, str(args.dt), str(args.steps), str(samples),
-                  str(args.warmups), "timing" if mode == "timing" else "perf",
-                  directory / "final.txt", args.solver]
+        driver = [binary, instance, str(args.dt), str(args.steps), str(args.samples),
+                  str(args.warmups), "timing", directory / "final.txt", args.solver]
         if theta is not None:
             driver.extend(["theta", str(theta)])
         if "order" in status:
             driver.extend(["order", str(status["order"])])
 
-        if mode == "timing":
-            if run_logged(driver, directory, stdout="samples.csv"):
-                raise RuntimeError("Benchmark failed; see stderr.log.")
-            with (directory / "samples.csv").open(newline="") as source:
-                durations = [float(row["seconds"]) for row in csv.DictReader(source)]
-            if len(durations) != samples:
-                raise ValueError("Unexpected number of timing samples.")
-            summary = {"solver": args.solver, "theta": theta, "order": status.get("order"), "steps": args.steps, "dt": args.dt,
-                       **timing_summary(durations, args.steps)}
-            write_csv(directory / "summary.csv", list(summary), [summary])
-        elif mode == "profile":
-            data = directory / "perf.data"
-            command = ["perf", "record", "--delay=-1", "-e", "cpu-clock:u", "-F", "99",
-                       "--call-graph", "fp", "-o", data, "--", *driver]
-            if run_logged(command, directory):
-                raise RuntimeError("perf record failed; see stderr.log for permissions/tool errors.")
-            if run_logged(["perf", "report", "--stdio", "--no-children", "-i", data],
-                          directory, "report.txt", "report.stderr.log"):
-                raise RuntimeError("perf report failed; see report.stderr.log.")
-            if run_logged(["perf", "script", "-G", "-i", data, "-F", "event"],
-                          directory, "sample-events.txt", "script.stderr.log"):
-                raise RuntimeError("Could not inspect profile samples; see script.stderr.log.")
-            events = (directory / "sample-events.txt").read_text().splitlines()
-            status["sample_count"] = sum(bool(line.strip()) and not line.startswith("#") for line in events)
-            if not status["sample_count"]:
-                raise RuntimeError("Profile contains no samples. Increase --steps and run again.")
-        else:
-            raw = directory / "perf-stat.txt"
-            command = ["perf", "stat", "--delay=-1", "-x", ";", "--no-big-num",
-                       "-e", args.events, "-o", raw, "--", *driver]
-            code = run_logged(command, directory)
-            rows = parse_counters(raw.read_text()) if raw.exists() else []
-            write_csv(directory / "counters.csv", COUNTER_FIELDS, rows)
-            write_csv(directory / "ratios.csv", ["metric", "value", "unit", "status"],
-                      counter_ratios(rows))
-            if code:
-                raise RuntimeError("perf stat failed; see stderr.log and perf-stat.txt.")
-            if not rows or any(row["status"] != "ok" for row in rows):
-                raise RuntimeError("Some counters are unavailable/not counted; see counters.csv. Use --events to select supported events.")
+        if run_logged(driver, directory, stdout="samples.csv"):
+            raise RuntimeError("Benchmark failed; see stderr.log.")
+        with (directory / "samples.csv").open(newline="") as source:
+            durations = [float(row["seconds"]) for row in csv.DictReader(source)]
+        if len(durations) != args.samples:
+            raise ValueError("Unexpected number of timing samples.")
+        summary = {"solver": args.solver, "theta": theta, "order": status.get("order"),
+                   "steps": args.steps, "dt": args.dt,
+                   **timing_summary(durations, args.steps)}
+        write_csv(directory / "summary.csv", list(summary), [summary])
         status["status"] = "ok"
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         status["error"] = str(error)
@@ -317,7 +224,7 @@ def collect(mode, binary, instance, directory, args):
     return status, summary
 
 
-def create_experiment_directory(results_dir, mode):
+def create_experiment_directory(results_dir):
     try:
         revision = subprocess.run(["git", "rev-parse", "--short=7", "--verify", "HEAD^{commit}"],
                                   cwd=ROOT, capture_output=True, text=True, timeout=15)
@@ -327,7 +234,7 @@ def create_experiment_directory(results_dir, mode):
     if revision.returncode != 0 or not re.fullmatch(r"[0-9a-f]{7,64}", short_hash):
         raise RuntimeError("Cannot identify Git commit: " + (revision.stderr.strip() or "invalid Git output"))
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S.%fZ")
-    directory = results_dir.resolve() / f"{short_hash}_{timestamp}_{mode}"
+    directory = results_dir.resolve() / f"{short_hash}_{timestamp}_timing"
     directory.mkdir(parents=True, exist_ok=False)
     return directory
 
@@ -342,12 +249,11 @@ def build_and_archive(directory):
 
 
 def experiment(args):
-    directory = create_experiment_directory(args.results_dir, args.mode)
+    directory = create_experiment_directory(args.results_dir)
     summaries = []
     failed = False
     try:
         binary = build_and_archive(directory)
-        modes = ("timing", "profile", "counters") if args.mode == "all" else (args.mode,)
         for index, path in enumerate(args.inputs, 1):
             path = Path(path).resolve()
             name = f"{index:04d}-{re.sub(r'[^A-Za-z0-9_.-]', '_', path.stem)[:80]}"
@@ -356,23 +262,19 @@ def experiment(args):
             try:
                 instance = folder / "input.txt"
                 shutil.copyfile(path, instance)
-                successful_modes = []
-                for mode in modes:
-                    status, summary = collect(mode, binary, instance, folder / mode, args)
-                    failed |= status["status"] != "ok"
-                    if status["status"] == "ok":
-                        successful_modes.append(mode)
-                    if summary:
-                        summaries.append({"instance": name, **summary})
-                if args.compare_direct:
-                    failed |= not compare_direct(binary, instance, folder, successful_modes, args)
+                status, summary = collect_timing(binary, instance, folder / "timing", args)
+                failed |= status["status"] != "ok"
+                if summary:
+                    summaries.append({"instance": name, **summary})
+                if args.compare_n2 and status["status"] == "ok":
+                    failed |= not compare_n2(binary, instance, folder, args)
             except OSError as error:
                 write_json(folder / "status.json", {"status": "failed", "error": str(error)})
                 failed = True
-        if args.mode in ("timing", "all"):
-            fields = ["instance", "solver", "theta", "order", "steps", "dt", "samples", "mean_seconds_per_step",
-                      "variance_seconds_per_step_squared", "stddev_seconds_per_step"]
-            write_csv(directory / "timing-summary.csv", fields, summaries)
+        fields = ["instance", "solver", "theta", "order", "steps", "dt", "samples",
+                  "mean_seconds_per_step", "variance_seconds_per_step_squared",
+                  "stddev_seconds_per_step"]
+        write_csv(directory / "timing-summary.csv", fields, summaries)
     except (OSError, ValueError, RuntimeError) as error:
         (directory / "error.txt").write_text(str(error) + "\n", encoding="utf-8")
         failed = True
@@ -393,29 +295,23 @@ def experiment(args):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    modes = parser.add_subparsers(dest="mode", required=True)
-    for mode in ("timing", "profile", "counters", "all"):
-        sub = modes.add_parser(mode)
-        sub.add_argument("inputs", nargs="+", help="instance files (shell globs supported)")
-        sub.add_argument("--dt", type=float, required=True)
-        sub.add_argument("--steps", type=int, required=True)
-        sub.add_argument("--warmups", type=int, default=1)
-        sub.add_argument("--solver", default="direct")
-        sub.add_argument("--order", help="FMM expansion order (1 through 6)")
-        sub.add_argument("--theta", type=float, help="solver opening parameter (default supplied by the solver)")
-        sub.add_argument("--compare-direct", action="store_true",
-                         help="compare final trajectory state with an unmeasured direct run")
-        sub.add_argument("--results-dir", type=Path, default=ROOT / "results",
-                         help="parent directory for automatically named experiments (default: results/)")
-        if mode in ("timing", "all"):
-            sub.add_argument("--samples", type=int, default=10)
-        else:
-            sub.set_defaults(samples=1)
-        if mode in ("counters", "all"):
-            sub.add_argument("--events", default=DEFAULT_EVENTS, help="perf event list")
-        else:
-            sub.set_defaults(events=DEFAULT_EVENTS)
+    parser.add_argument("mode", choices=("timing",), help="collect runtime statistics")
+    parser.add_argument("inputs", nargs="+", help="instance files (shell globs supported)")
+    parser.add_argument("--dt", type=float, required=True)
+    parser.add_argument("--steps", type=int, required=True)
+    parser.add_argument("--samples", type=int, default=10)
+    parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument("--solver", default="n2")
+    parser.add_argument("--order", help="FMM expansion order (1 through 6)")
+    parser.add_argument("--theta", type=float,
+                        help="solver opening parameter (default supplied by the solver)")
+    parser.add_argument("--compare-n2", action="store_true",
+                        help="compare final trajectory state with an unmeasured n2 run")
+    parser.add_argument("--results-dir", type=Path, default=ROOT / "results",
+                        help="parent directory for automatically named experiments (default: results/)")
     args = parser.parse_args(argv)
+    if args.solver == "direct":
+        parser.error("solver direct was renamed to n2")
     if args.solver == "approximate":
         parser.error("solver approximate was renamed to barnes-hut")
     if args.theta is not None and args.order is not None:
@@ -425,10 +321,8 @@ def parse_args(argv=None):
             parser.error("--theta must be finite and nonnegative")
     if not math.isfinite(args.dt) or args.dt <= 0 or args.steps <= 0 or args.warmups < 0:
         parser.error("dt and steps must be positive, dt finite, and warmups nonnegative")
-    if args.mode in ("timing", "all") and args.samples < 2:
+    if args.samples < 2:
         parser.error("timing requires --samples >= 2")
-    if not args.events.strip():
-        parser.error("--events must not be empty")
     return args
 
 

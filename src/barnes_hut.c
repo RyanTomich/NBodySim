@@ -2,12 +2,20 @@
 #include "solver_internal.h"
 #include "octree_internal.h"
 #include "gravity_internal.h"
+#include "n2_internal.h"
 
 #include <assert.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Positive-mass source summary, separate from spatial tree geometry.
+ * Zero-initialize before adding particles or child monopoles. */
+typedef struct {
+    double mass;
+    Vec3 center_of_mass;
+} GravityMonopole;
 
 typedef struct {
     double theta; /* Zero opens every internal node. */
@@ -32,6 +40,42 @@ typedef struct {
     size_t aggregate_evaluations; /* Aggregate contributions across all targets. */
     BarnesHutTotals totals; /* Cumulative; caller may zero between runs. */
 } BarnesHutWorkspace;
+
+/* Add a particle (mass, position) or merge a child (mass, center_of_mass).
+ * False means the aggregate is unrepresentable; discard it and fall back. */
+/* Incremental weighted means avoid forming mass * position. */
+static bool gravity_monopole_add(GravityMonopole *monopole, double mass, Vec3 position)
+{
+    double total = monopole->mass + mass;
+    if (!isfinite(total) || mass <= 0.0) {
+        return false;
+    }
+    if (monopole->mass == 0.0) {
+        monopole->center_of_mass = position;
+    } else {
+        double fraction = mass / total;
+        monopole->center_of_mass.x += fraction * (position.x - monopole->center_of_mass.x);
+        monopole->center_of_mass.y += fraction * (position.y - monopole->center_of_mass.y);
+        monopole->center_of_mass.z += fraction * (position.z - monopole->center_of_mass.z);
+    }
+    monopole->mass = total;
+    return isfinite(monopole->center_of_mass.x) && isfinite(monopole->center_of_mass.y)
+        && isfinite(monopole->center_of_mass.z);
+}
+
+/* The caller must establish a nonzero, finite distance to this monopole. */
+static Vec3 gravity_monopole_acceleration(const GravityMonopole *monopole, Vec3 target)
+{
+    Vec3 displacement = {monopole->center_of_mass.x - target.x,
+                         monopole->center_of_mass.y - target.y,
+                         monopole->center_of_mass.z - target.z};
+    double distance = hypot(hypot(displacement.x, displacement.y), displacement.z);
+    /* Equivalent to M * displacement / r^3 without explicitly cubing r. */
+    double scale = (monopole->mass / distance) / distance;
+    return (Vec3){scale * (displacement.x / distance),
+                  scale * (displacement.y / distance),
+                  scale * (displacement.z / distance)};
+}
 
 static BarnesHutConfig barnes_hut_default_config(void)
 {
@@ -189,9 +233,9 @@ static void evaluate(const SimulationView *state, double *ax, double *ay,
     workspace->aggregate_fallback = !workspace->bounds_fallback
                                  && !aggregate_tree(state, workspace);
     if (workspace->bounds_fallback || workspace->aggregate_fallback) {
-        /* Count directed contributions, even though direct gravity shares pairs. */
+        /* Count directed contributions, even though n2 shares pairs. */
         workspace->direct_evaluations = state->count * (state->count - 1);
-        gravity_direct(state, ax, ay, az, NULL);
+        n2_accelerations(state, ax, ay, az);
         return;
     }
 
@@ -207,9 +251,9 @@ static void evaluate(const SimulationView *state, double *ax, double *ay,
 }
 
 static void gravity_barnes_hut(const SimulationView *state, double *ax, double *ay,
-                         double *az, void *context)
+                         double *az, void *solver_context)
 {
-    BarnesHutWorkspace *workspace = context;
+    BarnesHutWorkspace *workspace = solver_context;
     if (state->count == 0 && !workspace) {
         return;
     }
@@ -224,7 +268,7 @@ static void gravity_barnes_hut(const SimulationView *state, double *ax, double *
     workspace->totals.aggregate_evaluations += workspace->aggregate_evaluations;
 }
 
-static bool barnes_hut_create(void **context, size_t count, const SolverOption *options,
+static bool barnes_hut_create(void **solver_context, size_t count, const SolverOption *options,
                                size_t option_count, const char **error)
 {
     BarnesHutConfig config = barnes_hut_default_config();
@@ -260,37 +304,37 @@ static bool barnes_hut_create(void **context, size_t count, const SolverOption *
         return false;
     }
     workspace->config = config;
-    *context = workspace;
+    *solver_context = workspace;
     return true;
 }
 
-static void barnes_hut_destroy(void *context)
+static void barnes_hut_destroy(void *solver_context)
 {
-    BarnesHutWorkspace *workspace = context;
+    BarnesHutWorkspace *workspace = solver_context;
     octree_destroy(&workspace->tree);
     free(workspace->monopoles);
     free(workspace);
 }
 
-static void barnes_hut_settings(const void *context, MetadataVisitor visit, void *user)
+static void barnes_hut_settings(const void *solver_context, MetadataVisitor visit, void *visitor_context)
 {
-    const BarnesHutWorkspace *workspace = context;
-    visit("theta", (MetadataValue){METADATA_DOUBLE, {.real = workspace->config.theta}}, user);
-    visit("bucket_capacity", (MetadataValue){METADATA_SIZE, {.size = workspace->config.bucket_capacity}}, user);
-    visit("max_depth", (MetadataValue){METADATA_SIZE, {.size = workspace->config.max_depth}}, user);
-    visit("node_capacity", (MetadataValue){METADATA_SIZE, {.size = workspace->tree.node_capacity}}, user);
+    const BarnesHutWorkspace *workspace = solver_context;
+    visit("theta", (MetadataValue){METADATA_DOUBLE, {.real = workspace->config.theta}}, visitor_context);
+    visit("bucket_capacity", (MetadataValue){METADATA_SIZE, {.size = workspace->config.bucket_capacity}}, visitor_context);
+    visit("max_depth", (MetadataValue){METADATA_SIZE, {.size = workspace->config.max_depth}}, visitor_context);
+    visit("node_capacity", (MetadataValue){METADATA_SIZE, {.size = workspace->tree.node_capacity}}, visitor_context);
 }
 
-static void barnes_hut_diagnostics(const void *context, MetadataVisitor visit, void *user)
+static void barnes_hut_diagnostics(const void *solver_context, MetadataVisitor visit, void *visitor_context)
 {
-    const BarnesHutTotals *totals = &((const BarnesHutWorkspace *)context)->totals;
-#define REPORT(field) visit(#field, (MetadataValue){METADATA_SIZE, {.size = totals->field}}, user)
+    const BarnesHutTotals *totals = &((const BarnesHutWorkspace *)solver_context)->totals;
+#define REPORT(field) visit(#field, (MetadataValue){METADATA_SIZE, {.size = totals->field}}, visitor_context)
     REPORT(calls);
     REPORT(capacity_limited_leaves);
     REPORT(bounds_fallbacks);
     REPORT(aggregate_fallbacks);
     /* Historical result field, derived rather than counted twice. */
-    visit("accepted_nodes", (MetadataValue){METADATA_SIZE, {.size = totals->aggregate_evaluations}}, user);
+    visit("accepted_nodes", (MetadataValue){METADATA_SIZE, {.size = totals->aggregate_evaluations}}, visitor_context);
     REPORT(source_node_visits);
     REPORT(direct_evaluations);
     REPORT(aggregate_evaluations);

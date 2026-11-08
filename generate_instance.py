@@ -8,6 +8,7 @@ The header contains only the body count; --seed controls reproducible generation
 
 import argparse
 import math
+from pathlib import Path
 import random
 
 
@@ -70,7 +71,8 @@ def main():
     parser.add_argument("--v-max", type=float, required=True)
     parser.add_argument("--a-max", type=float, required=True)
     parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--output", required=True, help="output file (overwritten)")
+    parser.add_argument("--output", type=Path,
+                        help="output file (overwritten; default: bench/data/instance-nN-seedS.txt)")
     args = parser.parse_args()
 
     bounds = (args.L, args.w_min, args.w_max, args.v_max, args.a_max)
@@ -83,8 +85,13 @@ def main():
     if args.n > 1 and args.L == 0:
         parser.error("L must be positive for multiple distinct positions")
 
+    if args.output is None:
+        args.output = (Path(__file__).resolve().parent / "bench" / "data"
+                       / f"instance-n{args.n}-seed{args.seed}.txt")
+
     rng = random.Random(args.seed)
     try:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as destination:
             destination.write(f"{args.n}\n")
             for _ in range(args.n):

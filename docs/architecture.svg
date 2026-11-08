@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="820" viewBox="0 0 1500 820" role="img" aria-labelledby="title desc">
+<title id="title">N-body simulator module flowchart</title>
+<desc id="desc">Main orchestrates a CLI simulation with state I/O and numeric parsing, owned simulation state, backend lifecycle management and forward Euler time stepping. solver.c selects and prepares a backend; euler.c invokes its acceleration callback each step. Barnes–Hut owns monopole aggregation and traversal; FMM owns multipole construction, tree interactions and local evaluation. Both tree solvers use direct particle interactions and a bounded spatial hierarchy, with all-pairs fallback. laplace.c prepares Cartesian expansion tables and translates multipoles to local expansions, using generated unrolled arithmetic at order four. Secondary parsing, lifecycle and state-view calls are omitted.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#64748b"/></marker></defs>
+<rect width="1500" height="820" fill="white"/>
+<path d="M700 80 L700 115 L190 115 L190 150" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>M to IO</title></path>
+<path d="M700 80 L700 115 L540 115 L540 150" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>M to S</title></path>
+<path d="M700 80 L700 115 L890 115 L890 150" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>M to R</title></path>
+<path d="M700 80 L700 115 L1230 115 L1230 150" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>M to E</title></path>
+<path d="M1230 210 L1230 250 L1040 250 L1040 280" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>E to CB</title></path>
+<path d="M875 310 L490 310 L490 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>CB to N2</title></path>
+<path d="M1040 340 L1040 375 L820 375 L820 410" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>CB to BH</title></path>
+<path d="M1040 340 L1040 375 L1190 375 L1190 410" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>CB to F</title></path>
+<path d="M710 440 L550 440 L550 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)" stroke-dasharray="6 5"><title>BH to N2: fallback</title></path>
+<path d="M1190 470 L1190 500 L590 500 L590 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)" stroke-dasharray="6 5"><title>F to N2: fallback</title></path>
+<path d="M790 470 L790 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>BH to G</title></path>
+<path d="M1160 470 L1160 530 L880 530 L880 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>F to G</title></path>
+<path d="M850 470 L850 515 L1040 515 L1040 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>BH to O</title></path>
+<path d="M1190 470 L1190 545 L1120 545 L1120 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>F to O</title></path>
+<path d="M1300 440 L1330 440 L1330 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>F to L</title></path>
+<path d="M1330 620 L1330 710" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>L to GEN</title></path>
+<g id="M" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="540" y="20" width="320" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="700" y="45">main.c</text>
+<text x="700" y="68">CLI simulation orchestration</text>
+</g>
+<g id="IO" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="20" y="150" width="340" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="190" y="175">io.c / parse.c</text>
+<text x="190" y="198">state I/O and numeric parsing</text>
+</g>
+<g id="S" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="390" y="150" width="300" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="540" y="175">state.c</text>
+<text x="540" y="198">state ownership and views</text>
+</g>
+<g id="R" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="725" y="150" width="330" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="890" y="175">solver.c</text>
+<text x="890" y="198">backend lifecycle and metadata</text>
+</g>
+<g id="E" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="1080" y="150" width="300" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="1230" y="175">euler.c</text>
+<text x="1230" y="198">forward Euler time stepping</text>
+</g>
+<g id="CB" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="875" y="280" width="330" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="1040" y="305">AccelerationSolver</text>
+<text x="1040" y="328">per-step gravity callback</text>
+</g>
+<g id="BH" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="710" y="410" width="220" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="820" y="435">barnes_hut.c</text>
+<text x="820" y="458">monopole tree solver</text>
+</g>
+<g id="F" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="1080" y="410" width="220" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="1190" y="435">fmm.c</text>
+<text x="1190" y="458">fast multipole solver</text>
+</g>
+<g id="N2" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="370" y="560" width="240" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="490" y="585">n2.c</text>
+<text x="490" y="608">direct all-pairs solver</text>
+</g>
+<g id="G" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="645" y="560" width="290" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="790" y="585">gravity.c</text>
+<text x="790" y="608">direct particle interactions</text>
+</g>
+<g id="O" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="965" y="560" width="230" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="1080" y="585">octree.c</text>
+<text x="1080" y="608">bounded spatial hierarchy</text>
+</g>
+<g id="L" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="1210" y="560" width="240" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="1330" y="585">laplace.c</text>
+<text x="1330" y="608" font-size="15">expansion tables and translation</text>
+</g>
+<g id="GEN" font-family="Arial, Helvetica, sans-serif" font-size="15" text-anchor="middle" fill="#1e293b"><rect x="1180" y="710" width="300" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="1330" y="735">generated/laplace_order4_internal.h</text>
+<text x="1330" y="758">unrolled order-4 translation</text>
+</g>
+<g font-family="Arial, Helvetica, sans-serif" font-size="16" fill="#475569"><path d="M40 760 H100" stroke="#64748b" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/><text x="115" y="766">Fallback to the all-pairs solver</text><text x="40" y="800">Module overview; secondary parsing, lifecycle and state-view calls omitted.</text></g></svg>

@@ -1,7 +1,7 @@
 #include "test_support.h"
 #include "io.h"
+#include "parse.h"
 #include <assert.h>
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -75,33 +75,15 @@ static void test_integration_contract(void)
 
 static void test_state_lifecycle(void)
 {
-    Simulation *source = from_bodies(initial, 2), *copy = from_bodies(initial, 2);
-    for (size_t step = 0; step < 3; ++step) {
-        IntegrationCheck check = {{initial[0], initial[1]}, 0};
-        assert(simulation_copy(copy, source));
-        simulate_with_solver(copy, 0.25, step, check_step, &check);
-        MutableSimulationView v = simulation_mutable_view(copy);
-        double *fields[] = {v.w, v.x, v.y, v.z, v.vx, v.vy, v.vz, v.ax, v.ay, v.az};
-        for (size_t field = 0; field < 10; ++field) {
-            fields[field][0] = NAN;
-            assert(!simulation_is_finite(copy));
-            assert(simulation_copy(copy, source));
-            assert(simulation_is_finite(copy));
-            for (size_t i = 0; i < 2; ++i) {
-                assert_body(body_at(copy, i), initial[i], 0);
-                assert_body(body_at(source, i), initial[i], 0);
-            }
-        }
-        assert(simulation_copy(copy, copy));
+    Simulation *state = from_bodies(initial, 2);
+    assert(simulation_view(state).count == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        assert_body(body_at(state, i), initial[i], 0);
     }
+    simulation_destroy(state);
     Simulation *empty = from_bodies(NULL, 0);
-    assert(simulation_view(empty).count == 0 && simulation_is_finite(empty));
-    assert(simulation_copy(empty, empty));
-    assert(!simulation_copy(copy, empty));
-    assert_body(body_at(copy, 0), initial[0], 0);
+    assert(simulation_view(empty).count == 0);
     simulation_destroy(empty);
-    simulation_destroy(copy);
-    simulation_destroy(source);
     Simulation *failed;
     assert(!simulation_create(&failed, SIZE_MAX) && failed == NULL);
     simulation_destroy(failed);

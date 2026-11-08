@@ -11,13 +11,12 @@ endif
 CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic
 override CFLAGS += -O3 -g -fno-omit-frame-pointer -fno-fast-math -UNDEBUG $(LTO_FLAGS)
 LDLIBS += -lm
-PYTHON ?= python3
 
 SOURCES := $(wildcard src/*.c)
 LIB_SOURCES := $(filter-out src/main.c,$(SOURCES))
 TEST_SOURCES := $(wildcard tests/*.c) $(LIB_SOURCES)
 BENCH_SOURCES := $(wildcard bench/*.c) $(LIB_SOURCES)
-HEADERS := $(wildcard src/*.h tests/*.h bench/*.h)
+HEADERS := $(wildcard src/*.h src/generated/*.h tests/*.h)
 
 .PHONY: all test clean print-config
 
@@ -32,16 +31,13 @@ build/bench: $(BENCH_SOURCES) $(HEADERS) Makefile | build
 build/tests: $(TEST_SOURCES) $(HEADERS) Makefile | build
 	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc $(TEST_SOURCES) $(LDLIBS) -o $@
 
-build/bench-test: bench/driver.c bench/metadata.c tests/bench/fake_simulation.c $(filter-out src/nbody.c,$(LIB_SOURCES)) $(HEADERS) Makefile | build
-	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc -Ibench bench/driver.c bench/metadata.c tests/bench/fake_simulation.c $(filter-out src/nbody.c,$(LIB_SOURCES)) $(LDLIBS) -o $@
-
 build:
 	mkdir -p $@
 
-test: all build/tests build/bench-test
+test: all build/tests
 	./build/tests
 	sh tests/test_cli.sh
-	$(PYTHON) -m unittest discover -s tests/bench -v
+	sh tests/test_bench.sh
 
 print-config:
 	@printf '%s\n' 'CC=$(CC)' 'LTO=$(LTO)' 'LTO_FLAGS=$(LTO_FLAGS)' \

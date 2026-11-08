@@ -1,0 +1,10 @@
+flowchart TD
+    GEN["generate_fmm_order4.py<br/>specialized arithmetic generation<br/>Manual source regeneration"] -->|generated order-four header| CORE["Simulator · src/<br/>state, time stepping and gravity<br/>Module details: architecture.svg"]
+    CORE -->|sources| BUILD["Makefile<br/>compile shared simulator sources<br/>build/app · build/tests · build/bench"]
+    BUILD -->|make test| TEST["tests/<br/>C contracts and CLI behavior<br/>Fixtures + independent gravity reference"]
+    BUILD -->|benchmark workflow| RUN["bench/run.py<br/>rebuild, archive and coordinate<br/>Saved inputs; optional n2 comparison"]
+    INPUT["Benchmark inputs<br/>generate_instance.py → bench/data/<br/>Seeded instances + curated data"] --> RUN
+    RUN -->|launches archived build/bench| DRIVER["bench/driver.c<br/>reset, warm up and time simulation<br/>Only simulate_with_solver is timed"]
+    DRIVER -->|runner collects and summarizes| RESULTS["results/<br/>persistent experiment records<br/>Binary, inputs, samples, summaries and logs"]
+    RESULTS -->|reads saved runs| PLOT["plot_results.py → plots/<br/>runtime and speedup figures<br/>Saved timings normalized by step count"]
+    click CORE "architecture.svg" "Open the simulator module diagram"

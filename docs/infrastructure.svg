@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1250" viewBox="0 0 1400 1250" role="img" aria-labelledby="title desc">
+<title id="title">N-body supporting infrastructure workflow</title>
+<desc id="desc">Read top to bottom. Manual order-four code generation feeds the simulator, whose module diagram is linked. The Makefile builds the application, tests and benchmark binary. Validation branches left to C contract and CLI tests, using fixtures and an independent reference. Benchmarking branches right: bench/run.py rebuilds and archives the binary, then launches bench/driver.c with curated or generated benchmark inputs. The driver times only simulation calls. The runner collects samples, summaries, states and logs in results. plot_results.py reads saved runs and produces runtime and speedup figures in plots.</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#64748b"/></marker></defs>
+<rect width="1400" height="1250" fill="white"/>
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#1e293b}.title{font-size:28px;font-weight:bold}.name{font-size:21px;font-weight:bold}.role{font-size:19px}.detail{font-size:16px;fill:#475569}.edge{font-size:16px;fill:#475569;paint-order:stroke;stroke:white;stroke-width:7px}</style>
+<text x="40" y="48" class="title">Supporting infrastructure</text>
+<text x="40" y="77" class="detail">Build → validate or benchmark → save → visualize</text>
+<path d="M700 215 V265" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="700" y="247" class="edge" text-anchor="middle">generated order-four header</text>
+<path d="M700 370 V420" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="700" y="402" class="edge" text-anchor="middle">sources</text>
+<path d="M700 525 V555 H280 V600" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="280" y="581" class="edge" text-anchor="middle">make test</text>
+<path d="M700 555 H850 V600" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="850" y="581" class="edge" text-anchor="middle">benchmark workflow</text>
+<path d="M1195 525 V555 H1040 V600" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M850 705 V760" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="850" y="739" class="edge" text-anchor="middle">launches archived build/bench</text>
+<path d="M850 865 V920" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="850" y="899" class="edge" text-anchor="middle">runner collects and summarizes</text>
+<path d="M850 1025 V1080" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<text x="850" y="1059" class="edge" text-anchor="middle">reads saved runs</text>
+<g id="generator"><rect x="480" y="110" width="440" height="105" rx="8" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="700.0" y="139" class="name" text-anchor="middle">generate_fmm_order4.py</text>
+<text x="700.0" y="167" class="role" text-anchor="middle">specialized arithmetic generation</text>
+<text x="700.0" y="195" class="detail" text-anchor="middle">Manual source regeneration</text>
+</g>
+<a href="architecture.svg">
+<g id="simulator"><rect x="480" y="265" width="440" height="105" rx="8" fill="#e0e7ff" stroke="#6366f1" stroke-width="1.5"/>
+<text x="700.0" y="294" class="name" text-anchor="middle">Simulator · src/</text>
+<text x="700.0" y="322" class="role" text-anchor="middle">state, time stepping and gravity</text>
+<text x="700.0" y="350" class="detail" text-anchor="middle">Module details: architecture.svg ↗</text>
+</g>
+</a>
+<g id="build"><rect x="480" y="420" width="440" height="105" rx="8" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="700.0" y="449" class="name" text-anchor="middle">Makefile</text>
+<text x="700.0" y="477" class="role" text-anchor="middle">compile shared simulator sources</text>
+<text x="700.0" y="505" class="detail" text-anchor="middle">build/app · build/tests · build/bench</text>
+</g>
+<g id="inputs"><rect x="1030" y="420" width="330" height="105" rx="8" fill="#ecfdf5" stroke="#6aa88b" stroke-width="1.5"/>
+<text x="1195.0" y="449" class="name" text-anchor="middle">Benchmark inputs</text>
+<text x="1195.0" y="477" class="role" text-anchor="middle">generate_instance.py → bench/data/</text>
+<text x="1195.0" y="505" class="detail" text-anchor="middle">Seeded instances + curated data</text>
+</g>
+<g id="validation"><rect x="60" y="600" width="440" height="105" rx="8" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="280.0" y="629" class="name" text-anchor="middle">tests/</text>
+<text x="280.0" y="657" class="role" text-anchor="middle">C contracts and CLI behavior</text>
+<text x="280.0" y="685" class="detail" text-anchor="middle">Fixtures + independent gravity reference</text>
+</g>
+<g id="runner"><rect x="630" y="600" width="440" height="105" rx="8" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="850.0" y="629" class="name" text-anchor="middle">bench/run.py</text>
+<text x="850.0" y="657" class="role" text-anchor="middle">rebuild, archive and coordinate</text>
+<text x="850.0" y="685" class="detail" text-anchor="middle">Saved inputs; optional n2 comparison</text>
+</g>
+<g id="driver"><rect x="630" y="760" width="440" height="105" rx="8" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="850.0" y="789" class="name" text-anchor="middle">bench/driver.c</text>
+<text x="850.0" y="817" class="role" text-anchor="middle">reset, warm up and time simulation</text>
+<text x="850.0" y="845" class="detail" text-anchor="middle">Only simulate_with_solver(...) is timed</text>
+</g>
+<g id="results"><rect x="630" y="920" width="440" height="105" rx="8" fill="#ecfdf5" stroke="#6aa88b" stroke-width="1.5"/>
+<text x="850.0" y="949" class="name" text-anchor="middle">results/</text>
+<text x="850.0" y="977" class="role" text-anchor="middle">persistent experiment records</text>
+<text x="850.0" y="1005" class="detail" text-anchor="middle">Binary, inputs, samples, summaries and logs</text>
+</g>
+<g id="plots"><rect x="630" y="1080" width="440" height="105" rx="8" fill="#ecfdf5" stroke="#6aa88b" stroke-width="1.5"/>
+<text x="850.0" y="1109" class="name" text-anchor="middle">plot_results.py → plots/</text>
+<text x="850.0" y="1137" class="role" text-anchor="middle">runtime and speedup figures</text>
+<text x="850.0" y="1165" class="detail" text-anchor="middle">Saved timings normalized by step count</text>
+</g>
+</svg>
