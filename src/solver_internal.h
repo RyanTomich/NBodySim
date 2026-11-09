@@ -19,6 +19,7 @@ struct SolverDescriptor {
 };
 extern const SolverDescriptor n2_solver;
 extern const SolverDescriptor barnes_hut_solver;
+extern const SolverDescriptor parallel_barnes_hut_solver;
 extern const SolverDescriptor fmm_solver;
 
 #endif

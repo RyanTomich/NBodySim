@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <omp.h>
 
 static void test_preparation_errors(void)
 {
@@ -381,8 +382,74 @@ static void check_fallback_contract(const char *name, const SolverOption *option
     solver_destroy(&solver);
 }
 
+static void test_parallel_barnes_hut(void)
+{
+    ReferenceBody bodies[CLOUD_SIZE];
+    fill_cloud(bodies);
+    const char *error;
+    Solver solver;
+    SolverOption exact = {"theta", "0"};
+    assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, &exact, 1, &error));
+    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
+    for (size_t i = 0; i < CLOUD_SIZE; ++i) {
+        bodies[i].position.x += 100;
+        bodies[i].w *= 2;
+    }
+    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
+    solver_destroy(&solver);
+    /* Coincidence, depth limits, and capacity pressure must preserve all bodies. */
+    bodies[1].position = bodies[0].position;
+    SolverOption fallbacks[] = {{"node_capacity", "1"}, {"max_depth", "0"}};
+    for (size_t k = 0; k < 2; ++k) {
+        assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, &fallbacks[k], 1, &error));
+        simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
+        solver_destroy(&solver);
+    }
+    assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, NULL, 0, &error));
+    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
+    solver_destroy(&solver);
+    /* Task summaries and target walks must give identical results at 1/2/4 threads. */
+    fill_cloud(bodies);
+    Simulation *state = from_bodies(bodies, CLOUD_SIZE);
+    SimulationView view = simulation_view(state);
+    SolverOption tasks[] = {{"theta", "0.6"}, {"task_cutoff", "8"}};
+    double baseline[3][CLOUD_SIZE], actual[3][CLOUD_SIZE];
+    int previous_threads = omp_get_max_threads();
+    for (int threads = 1; threads <= 4; threads *= 2) {
+        omp_set_num_threads(threads);
+        assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, tasks, 2, &error));
+        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+        if (threads == 1) memcpy(baseline, actual, sizeof baseline);
+        else assert(memcmp(baseline, actual, sizeof baseline) == 0);
+        /* Re-evaluate through the same prepared workspace. */
+        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+        assert(memcmp(baseline, actual, sizeof baseline) == 0);
+        solver_destroy(&solver);
+    }
+    /* Independent live contexts must not overwrite each other's inputs/workspace. */
+    Solver other;
+    assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, tasks, 2, &error));
+    assert(solver_create(&other, "parallel-barnes-hut", CLOUD_SIZE, &exact, 1, &error));
+    solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+    double first[3][CLOUD_SIZE];
+    memcpy(first, actual, sizeof first);
+    for (size_t i = 0; i < CLOUD_SIZE; ++i) bodies[i].position.x += 10;
+    simulation_destroy(check_force(&other, bodies, CLOUD_SIZE, 1e-11));
+    solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+    assert(memcmp(first, actual, sizeof first) == 0);
+    solver_destroy(&solver); solver_destroy(&other);
+    omp_set_num_threads(previous_threads);
+    simulation_destroy(state);
+    SolverOption bad[] = {{"theta", "nan"}, {"theta", "-1"}, {"task_cutoff", "-1"},
+                          {"max_depth", "65"}, {"unknown", "1"}};
+    for (size_t k = 0; k < sizeof bad / sizeof bad[0]; ++k)
+        assert(!solver_create(&solver, "parallel-barnes-hut", 3, &bad[k], 1, &error));
+    assert(!solver_create(&solver, "parallel-barnes-hut", SIZE_MAX, NULL, 0, &error));
+}
+
 void test_solver(void)
 {
+    test_parallel_barnes_hut();
     test_preparation_errors();
     test_configuration_contract();
     test_registered_solver_contract();

@@ -10,7 +10,16 @@ endif
 
 CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic
 override CFLAGS += -O3 -g -fno-omit-frame-pointer -fno-fast-math -UNDEBUG $(LTO_FLAGS)
-LDLIBS += -lm
+# OpenMP is required by parallel-barnes-hut. Override for other installations.
+ifeq ($(shell uname -s),Darwin)
+OMPFLAGS ?= -Xclang -fopenmp -isystem /opt/homebrew/opt/libomp/include
+OMPLIBS ?= -L/opt/homebrew/opt/libomp/lib -lomp
+else
+OMPFLAGS ?= -fopenmp
+OMPLIBS ?= -fopenmp
+endif
+override CFLAGS += $(OMPFLAGS)
+LDLIBS += $(OMPLIBS) -lm
 
 SOURCES := $(wildcard src/*.c)
 LIB_SOURCES := $(filter-out src/main.c,$(SOURCES))

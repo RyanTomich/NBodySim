@@ -1,7 +1,7 @@
 #include "solver_internal.h"
 #include <string.h>
 
-static const SolverDescriptor *const registry[] = {&n2_solver, &barnes_hut_solver, &fmm_solver};
+static const SolverDescriptor *const registry[] = {&n2_solver, &barnes_hut_solver, &parallel_barnes_hut_solver, &fmm_solver};
 
 size_t solver_count(void)
 {
@@ -18,6 +18,7 @@ bool solver_create(Solver *solver, const char *name, size_t count,
 {
     *solver = (Solver){0};
     *error = NULL;
+    if (strcmp(name, "barnes-hut") == 0) name = "serial-barnes-hut";
     for (size_t i = 0; i < option_count; ++i) {
         for (size_t j = 0; j < i; ++j) {
             if (strcmp(options[i].name, options[j].name) == 0) {

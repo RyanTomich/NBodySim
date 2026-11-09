@@ -1,12 +1,12 @@
 # 3D N-body simulator
 
-A serial C17 simulator for comparing direct (`n2`), Barnes–Hut, and fast multipole
+A C17/OpenMP simulator for comparing direct (`n2`), serial and parallel Barnes–Hut, and fast multipole
 (FMM) gravity solvers. All backends use the same forward Euler simulation loop
 and input format. Compare runtime and numerical differences using the same
 saved input, timestep, and step count; approximate solvers are not necessarily
 faster on small inputs.
 
-Requires Make and a C compiler with the standard math library. Benchmarking and
+Requires Make, a C compiler, and OpenMP (Homebrew `libomp` on macOS; GCC OpenMP on Linux). Benchmarking and
 instance generation use Python 3.8+ with no extra packages. Run the commands
 below from the repository root.
 
@@ -141,7 +141,7 @@ integrator; there is no adaptive timestep, softening, or collision handling.
 | `src/main.c`, `src/io.*` | Command-line entry point and instance I/O |
 | `src/nbody.h`, `src/state.c`, `src/euler.c` | Public simulation interface, state ownership, and time stepping |
 | `src/solver.*` | Backend selection and lifecycle |
-| `src/n2.c`, `src/barnes_hut.c`, `src/fmm.c` | Gravity backends |
+| `src/n2.c`, `src/serial_barnes_hut.c`, `src/fmm.c` | Gravity backends |
 | `src/gravity.c`, `src/octree.c`, `src/laplace.*` | Shared interactions, spatial tree, and FMM expansion calculations |
 | `bench/run.py`, `bench/driver.c` | Benchmark orchestration and measurement |
 | `tests/`, `tests/data/` | Regression tests and small fixtures |
@@ -153,3 +153,49 @@ See the [architecture diagram](docs/architecture.mmd) and
 [infrastructure diagram](docs/infrastructure.mmd) for module relationships.
 Public headers document interfaces; `*_internal.h` files contain implementation
 details. [AGENTS.md](AGENTS.md) contains contributor workflow and design constraints.
+
+## Parallel Barnes-Hut and four-solver benchmarks
+
+The registered solvers are `n2`, `serial-barnes-hut`, `parallel-barnes-hut`, and
+`fmm`. The old name `barnes-hut` remains an alias for `serial-barnes-hut`.
+`src/serial_barnes_hut.c` preserves the existing implementation;
+`src/parallel_barnes_hut.c` ports the Rushil tree algorithm to the shared solver
+interface, with private prepared workspace, reusable topology, task summaries,
+and parallel target walks. The old `rushil/` prototype remains for prior experiments.
+It falls back to exact n2 on depth/capacity/bounds/aggregate failure. There is no
+allocation inside an acceleration call. Parallel defaults: theta 0.5,
+task cutoff 256, maximum depth 64, preallocated node capacity 16*n+1.
+
+```sh
+make
+OMP_NUM_THREADS=4 ./build/app --solver parallel-barnes-hut --theta 0.6   bench/data/1000.txt 0.0001 20 > build/parallel-final.txt
+python3 bench/compare_solvers.py --bodies 1000 4000 16000 --threads 1 2 4 8   --samples 30 --warmups 3 --steps 20 --dt 0.0001 --theta 0.6 --order 4
+```
+
+The comparison builds once and uses the production `build/bench` timer for all
+four solvers, with exactly the same forward Euler loop, input, dt, and steps.
+Generated uniform inputs use seed 42, total mass 1, zero velocity, and initial
+accelerations computed by n2 outside timing. Timing covers only
+`simulate_with_solver`, including tree work and integration; setup, reset,
+validation, and output are excluded. Storage is reused across all samples.
+Configuration order is reproducibly shuffled after the direct reference.
+
+Results are retained in a unique `results/four-solvers-*` directory:
+`summary.md`, `comparison.csv`, `scaling.csv`, raw sample CSVs, final states,
+per-case status/configuration/diagnostics, build logs and measured binary.
+Force errors compare all solvers at identical initial positions. Trajectory
+errors compare final states against n2. Strong scaling uses each problem size's
+one-thread parallel Barnes-Hut run, with speedup T1/Tp and efficiency speedup/p.
+Actual OpenMP team sizes are checked and final states must agree across threads.
+Same theta is not equal accuracy; FMM order and theta are different controls.
+Uniform-input results and scaling apply to the tested machine/workload;
+additional threads need not improve speed on small cases.
+
+macOS defaults use `/opt/homebrew/opt/libomp`; override `OMPFLAGS` and `OMPLIBS`
+for another installation. Linux defaults use `-fopenmp`.
+
+Generate standalone PNG/PDF performance and strong-scaling plots (Matplotlib):
+
+```sh
+python3 bench/plot_comparison.py results/four-solvers-<timestamp>
+```

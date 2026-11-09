@@ -42,7 +42,7 @@ cmp build/cli-expected.txt build/cli-output.txt
 cmp build/cli-resumed.txt build/cli-n2.txt
 
 # Each solver is selectable before or after positional arguments.
-for solver in n2 barnes-hut fmm; do
+for solver in n2 barnes-hut serial-barnes-hut parallel-barnes-hut fmm; do
     for steps in 0 1 2 3; do
         ./build/app tests/data/two_body.txt 0.01 "$steps" > build/cli-default.txt
         ./build/app --solver "$solver" tests/data/two_body.txt 0.01 "$steps" > build/cli-output.txt
@@ -77,5 +77,11 @@ expect_failure --solver barnes-hut --order 4 tests/data/two_body.txt 0.01 0
 for order in 0 7 1.5; do
     expect_failure --solver fmm --order "$order" tests/data/two_body.txt 0.01 0
 done
+
+./build/app --solver barnes-hut tests/data/two_body.txt 0.01 3 > build/cli-alias.txt
+./build/app --solver serial-barnes-hut tests/data/two_body.txt 0.01 3 > build/cli-canonical.txt
+cmp build/cli-alias.txt build/cli-canonical.txt
+expect_failure --solver parallel-barnes-hut --theta nan tests/data/two_body.txt 0.01 1
+expect_failure --solver parallel-barnes-hut --order 4 tests/data/two_body.txt 0.01 1
 
 printf 'All CLI tests passed.\n'

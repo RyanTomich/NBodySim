@@ -9,14 +9,14 @@ order. Solver speed depends on body count and spatial distribution: approximate
 solvers need not beat `n2` on small inputs. Evaluate numerical differences and
 runtime together using the same saved initial state, timestep, and step count.
 
-The implementation is serial C17 with no external C libraries beyond the math
+The implementation is C17 with OpenMP for parallel Barnes-Hut and the math
 library. Building requires Make and a C compiler; generation and benchmarking
 use Python 3.8+ and its standard library. See `README.md` for usage and
 `docs/architecture.mmd` and `docs/infrastructure.mmd` for architecture diagrams.
 
 ## Project Structure & Module Organization
 
-This is a serial C17 3D N-body simulator with an `n2` O(n²) gravity solver and two approximate
+This is a C17/OpenMP 3D N-body simulator with an `n2` O(n²) gravity solver and two approximate
 solvers, Barnes–Hut and FMM.
 
 - `src/nbody.h` defines public state views and the simulation interface;
@@ -25,10 +25,10 @@ solvers, Barnes–Hut and FMM.
 - `src/solver.*` defines the shared preparation, destruction, and metadata interface.
   Keep representation details in `*_internal.h`; executables use public headers.
 - `src/gravity.c` and `src/gravity_internal.h` provide shared direct gravity interactions and source-range accumulation.
-  `src/barnes_hut.c` owns its private mass monopoles and their construction/evaluation helpers.
+  `src/serial_barnes_hut.c` owns its private mass monopoles and their construction/evaluation helpers.
 - `src/n2.c` implements the all-pairs solver; `src/n2_internal.h` exposes its kernel for tree-solver fallbacks.
 - `src/io.*` handles instance files.
-- `src/octree.c` builds the bounded octree used by `src/barnes_hut.c` and `src/fmm.c`.
+- `src/octree.c` builds the bounded octree used by `src/serial_barnes_hut.c` and `src/fmm.c`.
 - `src/laplace.*` owns expansion table preparation and translations;
   `src/generated/` contains generated order-four arithmetic.
 - `src/main.c` parses CLI arguments and prepares the selected solver.
@@ -238,3 +238,12 @@ Use concise, imperative subjects describing one focused change. PRs should
 explain the resulting behavior, relevant numerical or interface implications,
 and commands used for validation. Link related issues when applicable and update
 README examples when usage changes.
+
+## Parallel backend
+
+`src/parallel_barnes_hut.c` owns the ported Rushil solver's private tree/workspace.
+Registered names are `n2`, `serial-barnes-hut`, `parallel-barnes-hut`, `fmm`;
+`barnes-hut` is a compatibility alias for the serial backend. OpenMP is required.
+Keep all backends on the shared Euler integrator. Use `bench/compare_solvers.py`
+for a four-way accuracy/performance and thread-scaling study. Tests should run
+with `OMP_NUM_THREADS=4` to avoid excessive tiny-case thread overhead.

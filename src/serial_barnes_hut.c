@@ -342,7 +342,7 @@ static void barnes_hut_diagnostics(const void *solver_context, MetadataVisitor v
 }
 
 const SolverDescriptor barnes_hut_solver = {
-    .name = "barnes-hut",
+    .name = "serial-barnes-hut",
     .acceleration = gravity_barnes_hut,
     .create = barnes_hut_create,
     .destroy = barnes_hut_destroy,
