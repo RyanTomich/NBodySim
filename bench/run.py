@@ -128,6 +128,7 @@ def compare_n2(binary, instance, folder, args):
     directory = folder / "reference"
     directory.mkdir()
     status = {"solver": "n2", "steps": args.steps, "dt": args.dt,
+              "integrator": "leapfrog",
               "started": now(), "status": "failed"}
     reference = None
     try:
@@ -177,9 +178,9 @@ def driver_metadata(directory, status):
     path = directory / "stderr.log"
     if path.exists():
         for line in path.read_text().splitlines():
-            if line.startswith(("approximate_config: ", "solver_config: ")):
+            if line.startswith("solver_config: "):
                 status.update(json.loads(line.split(": ", 1)[1]))
-            elif line.startswith(("approximate_totals: ", "solver_totals: ")):
+            elif line.startswith("solver_totals: "):
                 status["diagnostics"] = json.loads(line.split(": ", 1)[1])
 
 
@@ -187,6 +188,7 @@ def collect_timing(binary, instance, directory, args):
     """Run warmups and timing samples, then save per-step statistics and status."""
     directory.mkdir()
     status = {"mode": "timing", "solver": args.solver, "steps": args.steps, "dt": args.dt,
+              "integrator": "leapfrog",
               "started": now(), "status": "failed"}
     summary = None
     theta = args.theta
@@ -310,10 +312,6 @@ def parse_args(argv=None):
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results",
                         help="parent directory for automatically named experiments (default: results/)")
     args = parser.parse_args(argv)
-    if args.solver == "direct":
-        parser.error("solver direct was renamed to n2")
-    if args.solver == "approximate":
-        parser.error("solver approximate was renamed to barnes-hut")
     if args.theta is not None and args.order is not None:
         parser.error("--theta and --order apply to different solvers")
     if args.theta is not None:

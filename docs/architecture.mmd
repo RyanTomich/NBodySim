@@ -2,12 +2,11 @@ flowchart TD
     M["main.c — CLI simulation orchestration"] --> IO["io.c / parse.c — state I/O and numeric parsing"]
     M --> S["state.c — state ownership and views"]
     M --> R["solver.c — backend lifecycle and metadata"]
-    M --> E["euler.c — forward Euler time stepping"]
-    E --> CB["AccelerationSolver — per-step gravity callback"]
+    M --> E["leapfrog.c — kick-drift-kick integration"]
+    E --> CB["AccelerationSolver — initial and per-step forces"]
     CB --> N2["n2.c — direct all-pairs solver"]
     CB --> BH["barnes_hut.c — monopole tree solver"]
     CB --> F["fmm.c — fast multipole solver"]
-    BH -. fallback .-> N2
     F -. fallback .-> N2
     BH --> G["gravity.c — direct particle interactions"]
     F --> G
@@ -15,3 +14,9 @@ flowchart TD
     F --> O
     F --> L["laplace.c — expansion tables and translation"]
     L --> GEN["generated/laplace_order4_internal.h — unrolled order-4 translation"]
+
+%% Every nonempty positive-step call recomputes initial acceleration, then uses
+%% one force evaluation per step. Forces depend only on masses and positions;
+%% post-drift velocities are half-step values. Publish acceleration only after
+%% the whole callback; return full-step velocities and final-position forces.
+%% Empty or zero-step calls preserve state and invoke no solver.

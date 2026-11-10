@@ -31,7 +31,7 @@ printf '0\n' > build/cli-empty.txt
 cmp build/cli-empty.txt build/cli-output.txt
 
 printf '1\n1 1 2 3 4 5 6 2 4 6\n' > build/cli-one-body.txt
-printf '1\n1 2 3.25 4.5 4.5 6 7.5 0 0 0\n' > build/cli-expected.txt
+printf '1\n1 2 3.25 4.5 4 5 6 0 0 0\n' > build/cli-expected.txt
 ./build/app build/cli-one-body.txt 0.25 1 > build/cli-output.txt
 cmp build/cli-expected.txt build/cli-output.txt
 
@@ -53,7 +53,6 @@ for solver in n2 barnes-hut fmm; do
 done
 expect_failure tests/data/two_body.txt 0.01 1 --solver
 expect_failure tests/data/two_body.txt 0.01 1 --solver unknown
-expect_failure tests/data/two_body.txt 0.01 1 --solver direct
 expect_failure --solver n2 tests/data/two_body.txt 0.01 1 --solver barnes-hut
 
 # Theta is valid only for Barnes–Hut runs, including full opening at zero.
@@ -71,7 +70,6 @@ expect_failure --solver n2 --order 4 tests/data/two_body.txt 0.01 1
 expect_failure --solver barnes-hut tests/data/two_body.txt 0.01 1 --theta
 expect_failure --solver barnes-hut --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
 
-expect_failure --solver approximate tests/data/two_body.txt 0.01 0
 expect_failure --solver fmm --theta 0 tests/data/two_body.txt 0.01 0
 expect_failure --solver barnes-hut --order 4 tests/data/two_body.txt 0.01 0
 for order in 0 7 1.5; do

@@ -4,73 +4,161 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 static const ReferenceBody initial[] = {
     {2, {1, 2, 3}, {4, 5, 6}, {2, 4, 6}},
     {3, {-1, 3, 2}, {-2, 1, 4}, {-1, 3, 5}}
 };
 
-typedef struct { ReferenceBody expected[2]; size_t calls; } IntegrationCheck;
+typedef struct {
+    ReferenceBody expected[257];
+    size_t count;
+    size_t calls;
+    bool initializing;
+} IntegrationCheck;
 
-/* Check the callback's entire snapshot before and after writing each output.
- * This detects premature publication without assuming how buffers are stored. */
+/* Independent scalar half-kick; drift is a separate pass in the reference. */
+static void reference_kick(ReferenceBody *bodies, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        bodies[i].velocity.x += 0.125 * bodies[i].acceleration.x;
+        bodies[i].velocity.y += 0.125 * bodies[i].acceleration.y;
+        bodies[i].velocity.z += 0.125 * bodies[i].acceleration.z;
+    }
+}
+
+static void assert_snapshot(const SimulationView *v, const IntegrationCheck *check)
+{
+    assert(v->count == check->count);
+    for (size_t i = 0; i < v->count; ++i) {
+        ReferenceBody actual = {v->w[i], {v->x[i], v->y[i], v->z[i]},
+            {v->vx[i], v->vy[i], v->vz[i]}, {v->ax[i], v->ay[i], v->az[i]}};
+        assert_body(actual, check->expected[i], 0);
+    }
+}
+
+/* A position-dependent coupled force. Check the entire callback snapshot before
+ * and after writing outputs, including the initial evaluation and half velocities. */
 static void check_step(const SimulationView *v, double *ax, double *ay, double *az, void *context)
 {
     IntegrationCheck *check = context;
-    assert(v->count == 2);
-    for (size_t i = 0; i < 2; ++i) {
-        ReferenceBody *b = &check->expected[i];
-        b->position.x += 0.25 * b->velocity.x;
-        b->position.y += 0.25 * b->velocity.y;
-        b->position.z += 0.25 * b->velocity.z;
-        b->velocity.x += 0.25 * b->acceleration.x;
-        b->velocity.y += 0.25 * b->acceleration.y;
-        b->velocity.z += 0.25 * b->acceleration.z;
-        ReferenceBody actual = {v->w[i], {v->x[i], v->y[i], v->z[i]},
-            {v->vx[i], v->vy[i], v->vz[i]}, {v->ax[i], v->ay[i], v->az[i]}};
-        assert_body(actual, *b, 0);
-    }
-    for (size_t i = 0; i < 2; ++i) {
-        ax[i] = v->ax[i] + v->ay[1 - i];
-        ay[i] = v->ay[i] - v->az[1 - i];
-        az[i] = v->az[i] + v->ax[1 - i];
-        for (size_t j = 0; j < 2; ++j) {
-            assert(v->ax[j] == check->expected[j].acceleration.x);
-            assert(v->ay[j] == check->expected[j].acceleration.y);
-            assert(v->az[j] == check->expected[j].acceleration.z);
+#ifdef _OPENMP
+    assert(!omp_in_parallel());
+#endif
+    if (!check->initializing) {
+        reference_kick(check->expected, check->count);
+        for (size_t i = 0; i < check->count; ++i) {
+            ReferenceBody *b = &check->expected[i];
+            b->position.x += 0.25 * b->velocity.x;
+            b->position.y += 0.25 * b->velocity.y;
+            b->position.z += 0.25 * b->velocity.z;
         }
     }
-    for (size_t i = 0; i < 2; ++i) {
+    assert_snapshot(v, check);
+    for (size_t i = 0; i < v->count; ++i) {
+        size_t j = (i + 1) % v->count;
+        ax[i] = v->w[j] * (v->x[j] - v->x[i]);
+        assert_snapshot(v, check);
+        ay[i] = v->w[j] * (v->y[j] - v->y[i]);
+        assert_snapshot(v, check);
+        az[i] = v->w[j] * (v->z[j] - v->z[i]);
+        assert_snapshot(v, check);
+    }
+    for (size_t i = 0; i < v->count; ++i) {
         check->expected[i].acceleration = (Vec3){ax[i], ay[i], az[i]};
     }
+    if (!check->initializing) {
+        reference_kick(check->expected, check->count);
+    }
+    check->initializing = false;
     ++check->calls;
 }
 
-static void test_integration_contract(void)
+static void check_integration_contract(size_t count)
 {
+    ReferenceBody bodies[257];
+    for (size_t i = 0; i < count; ++i) {
+        bodies[i] = (ReferenceBody){1 + (double)(i % 3),
+            {0.125 * (double)i, -0.25 * (double)(i % 7), 0.5 * (double)(i % 11)},
+            {0.25, -0.5, 0.125}, {1000, -2000, 3000}};
+    }
     for (size_t steps = 0; steps <= 4; ++steps) {
         for (size_t split = 0; split <= 1; ++split) {
-            Simulation *s = from_bodies(initial, 2);
-            IntegrationCheck check = {{initial[0], initial[1]}, 0};
+            Simulation *s = from_bodies(bodies, count);
+            IntegrationCheck check = {.count = count, .initializing = true};
+            for (size_t i = 0; i < count; ++i) {
+                check.expected[i] = bodies[i];
+            }
             if (split) {
                 for (size_t i = 0; i < steps; ++i) {
+                    check.initializing = true;
                     simulate_with_solver(s, 0.25, 1, check_step, &check);
                 }
             } else {
                 simulate_with_solver(s, 0.25, steps, check_step, &check);
             }
-            assert(check.calls == steps);
-            for (size_t i = 0; i < 2; ++i) {
+            assert(check.calls == (steps == 0 || count == 0 ? 0 : split ? 2 * steps : steps + 1));
+            for (size_t i = 0; i < count; ++i) {
                 assert_body(body_at(s, i), check.expected[i], 0);
             }
             simulation_destroy(s);
         }
     }
-    Simulation *empty = from_bodies(NULL, 0);
-    IntegrationCheck check = {0};
-    simulate_with_solver(empty, 0.25, 3, check_step, &check);
-    assert(check.calls == 0);
-    simulation_destroy(empty);
+}
+
+static void test_integration_contract(void)
+{
+    const size_t counts[] = {0, 1, 2, 257};
+#ifdef _OPENMP
+    int saved_threads = omp_get_max_threads();
+    int saved_dynamic = omp_get_dynamic();
+    omp_set_dynamic(0);
+    const int threads[] = {1, 4};
+    for (size_t team = 0; team < 2; ++team) {
+        omp_set_num_threads(threads[team]);
+#endif
+        for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); ++i) {
+            check_integration_contract(counts[i]);
+        }
+#ifdef _OPENMP
+    }
+    omp_set_num_threads(saved_threads);
+    omp_set_dynamic(saved_dynamic);
+#endif
+}
+
+static void test_acceleration_reinitialization(void)
+{
+    Simulation *a = from_bodies(initial, 2), *b = from_bodies(initial, 2);
+    for (size_t run = 0; run < 2; ++run) {
+        MutableSimulationView av = simulation_mutable_view(a);
+        MutableSimulationView bv = simulation_mutable_view(b);
+        if (run != 0) {
+            /* Reinitialization also follows external mass/position changes. */
+            av.w[0] = bv.w[0] = 7;
+            av.x[1] = bv.x[1] = 10;
+        }
+        for (size_t i = 0; i < 2; ++i) {
+            bv.ax[i] = 1000;
+            bv.ay[i] = -2000;
+            bv.az[i] = 3000;
+        }
+        IntegrationCheck first = {.expected = {body_at(a, 0), body_at(a, 1)}, .count = 2, .initializing = true};
+        IntegrationCheck second = {.expected = {body_at(b, 0), body_at(b, 1)}, .count = 2, .initializing = true};
+        simulate_with_solver(a, 0.25, 2, check_step, &first);
+        simulate_with_solver(b, 0.25, 2, check_step, &second);
+        assert(first.calls == 3 && second.calls == 3);
+        for (size_t i = 0; i < 2; ++i) {
+            assert_body(body_at(a, i), first.expected[i], 0);
+            assert_body(body_at(b, i), second.expected[i], 0);
+            assert_body(body_at(a, i), body_at(b, i), 0);
+        }
+    }
+    simulation_destroy(a);
+    simulation_destroy(b);
 }
 
 static void test_state_lifecycle(void)
@@ -102,13 +190,17 @@ static void test_io_contract(void)
     for (size_t count = 0; count <= 2; count += 2) {
         for (size_t steps = 0; steps <= 2; ++steps) {
             Simulation *s = from_bodies(initial, count), *loaded;
-            IntegrationCheck check = {{initial[0], initial[1]}, 0};
+            IntegrationCheck check = {.expected = {initial[0], initial[1]}, .count = count, .initializing = true};
             simulate_with_solver(s, 0.25, steps, check_step, &check);
             FILE *file = tmpfile();
             assert(file && write_bodies(file, s));
             rewind(file);
             assert(read_bodies(file, &loaded));
             assert(simulation_view(loaded).count == count);
+            for (size_t i = 0; i < count; ++i) {
+                assert_body(body_at(s, i), body_at(loaded, i), 0);
+            }
+            check.initializing = true;
             IntegrationCheck resumed = check;
             simulate_with_solver(s, 0.25, 1, check_step, &check);
             simulate_with_solver(loaded, 0.25, 1, check_step, &resumed);
@@ -175,6 +267,7 @@ static void test_invalid_input(void)
 void test_state(void)
 {
     test_integration_contract();
+    test_acceleration_reinitialization();
     test_state_lifecycle();
     test_io_contract();
     test_invalid_input();

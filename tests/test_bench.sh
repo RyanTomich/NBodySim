@@ -1,7 +1,8 @@
 #!/bin/sh
 set -eu
 
-# Nonzero input accelerations must be restored, including after odd step counts.
+# Reset the logical initial state before every call. Leapfrog recomputes its
+# acceleration, including after either parity of acceleration-buffer swaps.
 printf '1\n1 1 2 3 4 5 6 2 4 6\n' > build/bench-initial.txt
 printf '0\n' > build/bench-empty.txt
 for input in build/bench-initial.txt build/bench-empty.txt tests/data/two_body.txt; do
@@ -39,5 +40,49 @@ for mode in timing reference; do
         test ! -e build/bench-invalid-final.txt
     done
 done
+
+# Exercise saved timing/reference metadata with a short existing-driver run.
+python3 - <<'PY'
+import json
+from pathlib import Path
+import runpy
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+
+runner = runpy.run_path("bench/run.py")
+binary = Path("build/bench").resolve()
+instance = Path("tests/data/two_body.txt").resolve()
+for solver in ("n2", "barnes-hut", "fmm"):
+    args = SimpleNamespace(solver=solver, theta=None, order=None,
+                           dt=0.0001, steps=2, samples=2, warmups=1)
+    with TemporaryDirectory(dir="build") as temporary:
+        folder = Path(temporary).resolve()
+        status, summary = runner["collect_timing"](binary, instance, folder / "timing", args)
+        assert status["status"] == "ok", status
+        assert summary["samples"] == args.samples
+        if solver == "barnes-hut":
+            assert status["theta"] == 0.5
+            assert set(runner["solver_settings"](binary, instance, solver, None)) == {
+                "theta", "bucket_capacity", "max_depth", "node_capacity"
+            }
+            assert status["diagnostics"]["calls"] == (args.steps + 1) * (args.samples + args.warmups)
+            assert set(status["diagnostics"]) == {
+                "calls", "capacity_limited_leaves",
+                "source_node_visits", "direct_evaluations", "aggregate_evaluations", "scope"
+            }
+        assert runner["compare_n2"](binary, instance, folder, args)
+        for mode in ("timing", "reference"):
+            saved = json.loads((folder / mode / "status.json").read_text())
+            assert saved["status"] == "ok", saved
+            assert saved["integrator"] == "leapfrog"
+            assert saved["steps"] == args.steps and saved["dt"] == args.dt
+
+try:
+    runner["solver_settings"](binary, instance, "unknown", None)
+except RuntimeError as error:
+    assert "Unknown solver." in str(error), error
+else:
+    raise AssertionError("Unknown solver must fail")
+PY
 
 printf 'All benchmark tests passed.\n'

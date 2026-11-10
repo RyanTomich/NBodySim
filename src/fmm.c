@@ -15,6 +15,8 @@ typedef struct {
     size_t direct_pair_cutoff;
     CartesianTerms expansion;
     double *moments, *locals;
+    /* Per-node occupied extent about the cell center, refreshed in the upward pass. */
+    double *occupied_half_width;
     double polynomial[CARTESIAN_MAX_TERMS], kernel[CARTESIAN_MAX_TERMS];
     size_t calls, translations, direct_evaluations, capacity_limited_leaves, direct_fallbacks;
 } Fmm;
@@ -25,6 +27,7 @@ static void destroy(void *solver_context)
     octree_destroy(&f->tree);
     free(f->moments);
     free(f->locals);
+    free(f->occupied_half_width);
     free(f);
 }
 
@@ -59,7 +62,9 @@ static bool create(void **solver_context, size_t count, const SolverOption *opti
     size_t bytes = capacity * f->expansion.terms * sizeof(double);
     f->moments = malloc(bytes);
     f->locals = malloc(bytes);
-    if (!f->moments || !f->locals) {
+    /* The expansion allocation bound above also covers one double per node. */
+    f->occupied_half_width = malloc(capacity * sizeof(*f->occupied_half_width));
+    if (!f->moments || !f->locals || !f->occupied_half_width) {
         destroy(f);
         return false;
     }
@@ -124,7 +129,7 @@ static double max_axis_distance(Vec3 a, Vec3 b)
 static bool upward_pass(Fmm *f, const SimulationView *state)
 {
     for (size_t n = f->tree.node_count; n-- > 0;) {
-        OctreeNode *cell = &f->tree.nodes[n];
+        const OctreeNode *cell = &f->tree.nodes[n];
         double *moments = f->moments + n * f->expansion.terms;
         double extent = 0.0;
         if (cell->is_leaf) {
@@ -143,13 +148,13 @@ static bool upward_pass(Fmm *f, const SimulationView *state)
                 if (cell->children[c] != SIZE_MAX) {
                     const OctreeNode *child = &f->tree.nodes[cell->children[c]];
                     double enclosing = max_axis_distance(child->center, cell->center)
-                                     + child->occupied_half_width;
+                                     + f->occupied_half_width[cell->children[c]];
                     extent = fmax(extent, enclosing);
                     shift(f, n, cell->children[c], true);
                 }
             }
         }
-        cell->occupied_half_width = fmin(cell->half_width, nextafter(extent, INFINITY));
+        f->occupied_half_width[n] = fmin(cell->half_width, nextafter(extent, INFINITY));
         if (!finite_terms(moments, f->expansion.terms)) {
             return false;
         }
@@ -194,7 +199,8 @@ static bool interact(Fmm *f, Field *field, size_t source, size_t target)
     if (!isfinite(r)) {
         return false;
     }
-    if (r > 0 && (s->occupied_half_width + t->occupied_half_width) <= r * (0.5 / sqrt(3.0))) {
+    if (r > 0 && (f->occupied_half_width[source] + f->occupied_half_width[target])
+                <= r * (0.5 / sqrt(3.0))) {
         double unit[] = {dx / r, dy / r, dz / r};
         laplace_translate(&f->expansion, f->moments + source * f->expansion.terms,
                           s->half_width, t->half_width, unit, r, f->kernel,

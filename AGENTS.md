@@ -3,32 +3,38 @@
 ## Project Context
 
 The project compares exact and approximate gravity solvers through one shared
-forward Euler simulation loop. `n2` is the direct numerical reference;
+kick-drift-kick leapfrog loop. `n2` is the direct numerical reference;
 Barnes–Hut trades accuracy for speed through theta, and FMM through expansion
 order. Solver speed depends on body count and spatial distribution: approximate
 solvers need not beat `n2` on small inputs. Evaluate numerical differences and
 runtime together using the same saved initial state, timestep, and step count.
 
-The implementation is serial C17 with no external C libraries beyond the math
-library. Building requires Make and a C compiler; generation and benchmarking
+The implementation is C17, serial by default, with optional OpenMP parallel
+leapfrog body updates and Barnes–Hut target-leaf evaluation. Serial builds need
+no external C libraries beyond the math library; OpenMP builds also need
+compiler/runtime support.
+Building requires Make and a C compiler; generation and benchmarking
 use Python 3.8+ and its standard library. See `README.md` for usage and
 `docs/architecture.mmd` and `docs/infrastructure.mmd` for architecture diagrams.
 
 ## Project Structure & Module Organization
 
-This is a serial C17 3D N-body simulator with an `n2` O(n²) gravity solver and two approximate
+This is a C17 3D N-body simulator with an `n2` O(n²) gravity solver and two approximate
 solvers, Barnes–Hut and FMM.
 
 - `src/nbody.h` defines public state views and the simulation interface;
-  `src/euler.c` implements forward Euler time stepping.
+  `src/leapfrog.c` implements kick-drift-kick leapfrog time stepping.
 - `src/state.c` owns private storage and constructs borrowed array views.
 - `src/solver.*` defines the shared preparation, destruction, and metadata interface.
   Keep representation details in `*_internal.h`; executables use public headers.
 - `src/gravity.c` and `src/gravity_internal.h` provide shared direct gravity interactions and source-range accumulation.
   `src/barnes_hut.c` owns its private mass monopoles and their construction/evaluation helpers.
-- `src/n2.c` implements the all-pairs solver; `src/n2_internal.h` exposes its kernel for tree-solver fallbacks.
+- `src/n2.c` implements the all-pairs solver; `src/n2_internal.h` exposes its kernel for FMM fallbacks. Barnes–Hut has no all-pairs fallback; unrepresentable tree bounds or mass summaries produce `NaN` accelerations.
 - `src/io.*` handles instance files.
 - `src/octree.c` builds the bounded octree used by `src/barnes_hut.c` and `src/fmm.c`.
+  Barnes–Hut validates every leaf member before reusing topology and refreshes
+  all numerical summaries each call. Reuse is automatic; rebuilding occurs only
+  when topology is unavailable or membership validation fails. FMM rebuilds each call.
 - `src/laplace.*` owns expansion table preparation and translations;
   `src/generated/` contains generated order-four arithmetic.
 - `src/main.c` parses CLI arguments and prepares the selected solver.
@@ -86,6 +92,20 @@ assertions enabled. Link-time optimization (`-flto`) defaults to `LTO=1` for
 every target and requires compiler/linker support; failures do not silently
 disable it. Use `make LTO=0` for a non-LTO build, cleaning before switching
 settings. `make print-config` reports the selected LTO setting and flags.
+`OPENMP=0` is the default; use `make OPENMP=1` for parallel leapfrog body updates
+with every solver and Barnes–Hut force evaluation, with `OMPFLAGS`/`OMPLIBS`
+overrides as described in `README.md`.
+Clean before changing OpenMP settings. Set `OMP_NUM_THREADS` before solver
+creation: each prepared Barnes–Hut solver reserves that maximum worker count,
+with one count-element source buffer per worker. A prepared solver must not be
+called concurrently. Tree construction, aggregation, and `n2`/FMM force evaluation
+stay serial. Leapfrog uses static parallel loops for half-kick/drift and final
+half-kick, with implicit synchronization before and after the single force call
+outside those regions. Preserve that ordering and benchmark complete simulation
+time: the two parallel-region launches per step can cost more than they save on
+small inputs.
+For parallel integration or force changes, run clean serial and OpenMP
+`make test` builds and run the OpenMP unit executable with both one and four threads.
 Benchmark runs force a rebuild and inherit `LTO` from the environment; prefix
 the runner command with `LTO=0` for a non-LTO comparison.
 
@@ -126,7 +146,10 @@ Only `timing` is supported. Use `--results-dir PATH` to change the parent direct
 Measure the entire simulation call. Keep `samples.csv` as raw whole-run seconds;
 normalize each sample by `--steps` only for summaries and plotting (never by
 `dt`). Summary CSVs record solver, theta and order (blank when inapplicable), steps, dt, samples, `mean_seconds_per_step`,
-`variance_seconds_per_step_squared`, and `stddev_seconds_per_step`. `timing/status.json` records steps and dt. Approximate runs also record effective tree
+`variance_seconds_per_step_squared`, and `stddev_seconds_per_step`. Timing and
+reference status records identify `integrator: "leapfrog"`, steps, and dt.
+Initial force evaluation remains inside the measured call; nonempty calls make
+`steps + 1` force evaluations. Approximate runs also record effective tree
 settings and available diagnostics, whose totals span warmups and samples. Terminal output and runtime plots use ms/step;
 standard deviations describe variation across whole-run averages, not individual
 steps. The plotter skips older runs without recorded step counts with an
@@ -173,8 +196,14 @@ Keep gravity separate from the simulation loop. `AccelerationSolver` fills three
 disjoint acceleration arrays without modifying input or allocating. Prepare the
 solver once through `solver_create`, reuse it for the same body count, then call
 `solver_destroy`. All configuration defaults and validation belong to the backend.
-Preserve forward Euler ordering: input accelerations drive the first step, and
-new accelerations are published only after the whole solver call. Preserve the
+Preserve leapfrog ordering: recompute initial acceleration on every nonempty,
+positive-step invocation, then half-kick, drift, evaluate forces, and half-kick.
+Publish accelerations only after the whole solver call. Callbacks depend on
+current masses and positions, not half-step velocities or previous accelerations.
+Returned velocities are full-step values; returned accelerations match final
+positions. Empty or zero-step calls leave state untouched and invoke no solver.
+Leapfrog is second-order for smooth forces; do not promise exact energy
+conservation or symplectic behavior for approximate tree forces. Preserve the
 instance format: body count followed by `w x y z vx vy vz ax ay az` rows.
 `Simulation` is opaque and owns thirteen contiguous count-element arrays. Create
 it with `simulation_create`, initialize the ten state arrays through its mutable
@@ -226,9 +255,9 @@ the file works directly with the simulator and benchmark runner. `--seed`
 controls generation without adding seed metadata to the file.
 
 Use `--w-min > 0` for the gravity simulator; signed property bounds are supported
-by the generator but rejected by the current C reader. Random accelerations test
-arbitrary input states. For physically consistent cases, compute initial
-accelerations from the interaction law. Generator verification establishes input
+by the generator but rejected by the current C reader. Random acceleration fields
+test I/O round-tripping, but positive-step calls recompute them from gravity.
+Generator verification establishes input
 validity; check simulation correctness on small instances against a trusted
 direct O(n²) implementation before using larger instances for timing.
 

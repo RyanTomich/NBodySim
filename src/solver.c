@@ -43,8 +43,7 @@ bool solver_create(Solver *solver, const char *name, size_t count,
         *solver = (Solver){descriptor->acceleration, solver_context, descriptor};
         return true;
     }
-    *error = strcmp(name, "approximate") == 0
-           ? "Solver approximate was renamed to barnes-hut." : "Unknown solver.";
+    *error = "Unknown solver.";
     return false;
 }
 
