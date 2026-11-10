@@ -247,3 +247,8 @@ Registered names are `n2`, `serial-barnes-hut`, `parallel-barnes-hut`, `fmm`;
 Keep all backends on the shared Euler integrator. Use `bench/compare_solvers.py`
 for a four-way accuracy/performance and thread-scaling study. Tests should run
 with `OMP_NUM_THREADS=4` to avoid excessive tiny-case thread overhead.
+
+`src/leapfrog.c` provides optional kick-drift-kick integration. Euler's existing
+API and input-acceleration semantics remain unchanged. Benchmark sweeps select
+leapfrog with `--integrator leapfrog`; it computes its own starting acceleration,
+uses steps+1 solver evaluations, and shares the same solver callback contract.

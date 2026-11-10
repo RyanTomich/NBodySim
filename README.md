@@ -199,3 +199,40 @@ Generate standalone PNG/PDF performance and strong-scaling plots (Matplotlib):
 ```sh
 python3 bench/plot_comparison.py results/four-solvers-<timestamp>
 ```
+
+### Barnes-Hut theta sweep
+
+```sh
+python3 bench/compare_solvers.py --bodies 1000 4000 --threads 1 4 8 \
+  --samples 30 --warmups 3 --steps 10 \
+  --thetas 0.2 0.3 0.4 0.5 0.6 0.8 1.0 --barnes-hut-only
+python3 bench/plot_theta_sweep.py results/theta-sweep-<timestamp>
+```
+
+This measures both Barnes-Hut backends at each theta, with a direct n2 reference
+computed once per body count. It retains raw timings, force/trajectory errors,
+per-theta strong scaling, and a summary. Parallel results must match across
+thread counts separately for each theta. The plotter creates runtime-vs-theta,
+force-error-vs-theta, and speed-vs-error PNG/PDF panels, plus
+`accuracy_budgets.md`: fastest sampled settings meeting shared force-error
+budgets (no interpolation). The same theta is not the same accuracy.
+Use the theta-specific plotter for multi-theta results; `plot_comparison.py`
+is intended for the single-theta four-solver benchmark.
+
+### Leapfrog benchmark integration
+
+Select kick-drift-kick with `--integrator leapfrog` in `bench/compare_solvers.py`:
+
+```sh
+python3 bench/compare_solvers.py --integrator leapfrog   --bodies 1000 4000 --threads 1 4 8 --samples 30 --warmups 3 --steps 10   --thetas 0.2 0.3 0.4 0.5 0.6 0.8 1.0 --barnes-hut-only
+```
+
+All timed solvers and the n2 trajectory reference use the selected integrator.
+`src/leapfrog.c` computes the initial acceleration with each solver, then uses
+half kick, full drift, refreshed acceleration, and half kick. Timing includes
+steps+1 force calls. Supplied initial accelerations are ignored by leapfrog.
+Force accuracy is still evaluated separately at unchanged initial positions;
+this diagnostic is independent of the trajectory integrator. Euler remains the
+default for the application and benchmark. The benchmark driver accepts
+`NBODY_INTEGRATOR=euler|leapfrog`; the suite sets it explicitly for each run.
+Results record the selected integrator and use a distinct output directory.

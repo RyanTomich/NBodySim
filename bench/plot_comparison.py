@@ -2,6 +2,7 @@
 """Render standalone performance and scaling plots from compare_solvers results."""
 import argparse
 import csv
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -17,6 +18,8 @@ def main():
     parser.add_argument('results',type=Path)
     args=parser.parse_args()
     rows=list(csv.DictReader((args.results/'comparison.csv').open()))
+    status=json.loads((args.results/'status.json').read_text())
+    integrator='leapfrog' if 'leapfrog' in status.get('integrator','').lower() else 'Euler'
     scaling=list(csv.DictReader((args.results/'scaling.csv').open()))
     fig,ax=plt.subplots(figsize=(8,5),layout='constrained')
     keys=sorted(set((r['solver'],int(r['threads'])) for r in rows))
@@ -25,7 +28,7 @@ def main():
         label=solver+(f' ({threads} threads)' if solver=='parallel-barnes-hut' else '')
         ax.errorbar([int(r['bodies']) for r in group],[float(r['mean_ms_per_step']) for r in group],
                     yerr=[float(r['stddev_ms_per_step']) for r in group],marker='o',capsize=3,label=label)
-    ax.set(xscale='log',yscale='log',xlabel='Number of bodies',ylabel='Mean runtime (ms / Euler step)',title='Four solver performance; error bars = sample standard deviation')
+    ax.set(xscale='log',yscale='log',xlabel='Number of bodies',ylabel=f'Mean runtime (ms / {integrator} step)',title='Four solver performance; error bars = sample standard deviation')
     ax.grid(True,alpha=.2); ax.legend(fontsize=8)
     for ext in ('png','pdf'): fig.savefig(args.results/f'performance.{ext}',dpi=180)
     plt.close(fig)

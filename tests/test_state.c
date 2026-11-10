@@ -1,6 +1,7 @@
 #include "test_support.h"
 #include "io.h"
 #include "parse.h"
+#include "solver.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -172,8 +173,48 @@ static void test_invalid_input(void)
     assert(fclose(file) == 0);
 }
 
+static void constant_force(const SimulationView *view, double *ax, double *ay, double *az, void *context)
+{
+    ++*(size_t *)context;
+    for (size_t i = 0; i < view->count; ++i) { ax[i] = 2; ay[i] = -1; az[i] = 0; }
+}
+
+static void test_leapfrog(void)
+{
+    ReferenceBody body = {1, {1, 2, 3}, {4, 5, 6}, {999, 999, 999}};
+    Simulation *s = from_bodies(&body, 1);
+    size_t calls = 0;
+    simulate_leapfrog_with_solver(s, 0.1, 0, constant_force, &calls);
+    assert(calls == 0);
+    assert_body(body_at(s, 0), body, 0);
+    simulate_leapfrog_with_solver(s, 0.1, 10, constant_force, &calls);
+    assert(calls == 11);
+    ReferenceBody expected = {1, {6, 6.5, 9}, {6, 4, 6}, {2, -1, 0}};
+    assert_body(body_at(s, 0), expected, 1e-13);
+    simulation_destroy(s);
+    ReferenceBody pair[] = {{1, {-1, 0, 0}, {0, .2, 0}, {0}},
+                            {2, {1, 0, 0}, {0, -.1, 0}, {0}}};
+    s = from_bodies(pair, 2);
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "n2", 2, NULL, 0, &error));
+    simulate_leapfrog_with_solver(s, .001, 100, solver.acceleration, solver.context);
+    MutableSimulationView v = simulation_mutable_view(s);
+    for (size_t i = 0; i < 2; ++i) { v.vx[i] = -v.vx[i]; v.vy[i] = -v.vy[i]; v.vz[i] = -v.vz[i]; }
+    simulate_leapfrog_with_solver(s, .001, 100, solver.acceleration, solver.context);
+    for (size_t i = 0; i < 2; ++i) {
+        ReferenceBody actual = body_at(s, i);
+        assert_close(actual.position.x, pair[i].position.x, 1e-12);
+        assert_close(actual.position.y, pair[i].position.y, 1e-12);
+        assert_close(actual.velocity.x, -pair[i].velocity.x, 1e-12);
+        assert_close(actual.velocity.y, -pair[i].velocity.y, 1e-12);
+    }
+    solver_destroy(&solver); simulation_destroy(s);
+}
+
 void test_state(void)
 {
+    test_leapfrog();
     test_integration_contract();
     test_state_lifecycle();
     test_io_contract();

@@ -143,6 +143,14 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--metadata") == 0) {
         return metadata_query(argc - 2, argv + 2);
     }
+    const char *integrator = getenv("NBODY_INTEGRATOR");
+    if (!integrator) integrator = "euler";
+    if (strcmp(integrator, "euler") != 0 && strcmp(integrator, "leapfrog") != 0) {
+        fprintf(stderr, "NBODY_INTEGRATOR must be euler or leapfrog.\n");
+        return EXIT_FAILURE;
+    }
+    void (*simulate)(Simulation *, double, size_t, AccelerationSolver, void *) =
+        strcmp(integrator, "leapfrog") == 0 ? simulate_leapfrog_with_solver : simulate_with_solver;
     double dt;
     size_t steps, samples, warmups;
     if (argc < 8 || (argc > 9 && argc != 11)) {
@@ -198,7 +206,7 @@ int main(int argc, char **argv)
     metadata_log(stderr, &solver, false);
     for (size_t i = 0; i < warmups; ++i) {
         reset_state(simulation, initial);
-        simulate_with_solver(simulation, dt, steps, solver.acceleration, solver.context);
+        simulate(simulation, dt, steps, solver.acceleration, solver.context);
         if (!state_is_finite(simulation_view(simulation))) {
             fprintf(stderr, "Warmup produced a nonfinite state.\n");
             goto cleanup;
@@ -215,7 +223,7 @@ int main(int argc, char **argv)
             }
         }
 
-        simulate_with_solver(simulation, dt, steps, solver.acceleration, solver.context);
+        simulate(simulation, dt, steps, solver.acceleration, solver.context);
 
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {

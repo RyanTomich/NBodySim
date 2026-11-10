@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Benchmark all four registered solvers and parallel Barnes-Hut strong scaling.
-Uses the production build/bench timer and shared forward Euler integrator.
+Uses the production build/bench timer and shared Euler or leapfrog integrator.
 """
 import argparse
 import csv
@@ -37,6 +37,7 @@ def metadata(stderr, prefix):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--integrator',choices=['euler','leapfrog'],default='euler')
     parser.add_argument('--bodies',type=int,nargs='+',default=[1000,4000,16000])
     parser.add_argument('--threads',type=int,nargs='+',default=[1,2,4,8])
     parser.add_argument('--samples',type=int,default=30)
@@ -44,6 +45,8 @@ def main():
     parser.add_argument('--steps',type=int,default=20)
     parser.add_argument('--dt',type=float,default=0.0001)
     parser.add_argument('--theta',type=float,default=0.6)
+    parser.add_argument('--thetas',type=float,nargs='+',help='sweep Barnes-Hut theta values')
+    parser.add_argument('--barnes-hut-only',action='store_true',help='omit FMM from the comparison')
     parser.add_argument('--order',type=int,default=4)
     parser.add_argument('--seed',type=int,default=42)
     args=parser.parse_args()
@@ -52,11 +55,14 @@ def main():
             or not math.isfinite(args.theta) or args.theta<0 or args.order not in range(1,7)):
         parser.error('invalid workload/settings; require at least two steps')
     args.threads=sorted(set([1]+args.threads))
+    thetas=sorted(set(args.thetas if args.thetas is not None else [args.theta]))
+    if any(not math.isfinite(t) or t<0 for t in thetas):
+        parser.error('theta values must be finite and nonnegative')
     stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    out=ROOT/'results'/f'four-solvers-{stamp}'
+    out=ROOT/'results'/f"{'theta-sweep' if args.thetas is not None else 'four-solvers'}-{args.integrator}-{stamp}"
     out.mkdir(parents=True)
-    status={'status':'running','settings':vars(args),'integrator':'production forward Euler',
-            'scope':'simulate_with_solver only; includes integration and full solver calls',
+    status={'status':'running','settings':vars(args),'integrator':args.integrator,
+            'scope':'integration and full solver calls only; leapfrog includes its initial force evaluation',
             'cpu_count':os.cpu_count(),'platform':os.uname().sysname,'machine':os.uname().machine,
             'initialization':'generator uniform positions, equal total mass 1, v=0; direct n2 initial acceleration',
             'reference':'n2 with identical initial state, dt and steps',
@@ -82,15 +88,18 @@ def main():
             initial=case/'input.txt'; initial.write_text(initial_text)
             raw_state=read_state(raw); initial_state=read_state(initial)
             assert [r[:7] for r in raw_state]==[r[:7] for r in initial_state]
-            configurations=[('serial-barnes-hut',1,'theta',args.theta),('fmm',1,'order',args.order)]
-            configurations += [('parallel-barnes-hut',t,'theta',args.theta) for t in args.threads]
+            configurations=[]
+            if not args.barnes_hut_only: configurations.append(('fmm',1,'order',args.order))
+            for opening in thetas:
+                configurations.append(('serial-barnes-hut',1,'theta',opening))
+                configurations += [('parallel-barnes-hut',t,'theta',opening) for t in args.threads]
             random.Random(args.seed+count).shuffle(configurations)
             configurations.insert(0,('n2',1,None,None))
-            reference=None; force_reference=None; parallel_reference=None
+            reference=None; force_reference=None; parallel_references={}
             for solver,threads,key,value in configurations:
-                folder=case/f'{solver}-{threads}threads'; folder.mkdir()
+                folder=case/(f'{solver}-{threads}threads'+(f'-theta{value:g}' if key=='theta' else '')); folder.mkdir()
                 env=dict(os.environ,OMP_NUM_THREADS=str(threads),OMP_DYNAMIC='FALSE',
-                         OMP_PROC_BIND='close',OMP_PLACES='cores')
+                         OMP_PROC_BIND='close',OMP_PLACES='cores',NBODY_INTEGRATOR=args.integrator)
                 option=[] if key is None else [key,value]
                 samples_text,stderr=execute([out/'bench',initial,args.dt,args.steps,args.samples,
                      args.warmups,'timing',folder/'final.txt',solver,*option],folder,env)
@@ -101,8 +110,8 @@ def main():
                 final=read_state(folder/'final.txt')
                 if solver=='n2': reference=final
                 if solver=='parallel-barnes-hut':
-                    if parallel_reference is None: parallel_reference=final
-                    elif final!=parallel_reference: raise ValueError('Thread count changed final state')
+                    if value not in parallel_references: parallel_references[value]=final
+                    elif final!=parallel_references[value]: raise ValueError('Thread count changed final state')
                 errors=trajectory_errors(final,reference)
                 write_csv(folder/'trajectory-error.csv',list(errors[0]),errors)
                 # v=0 means first Euler drift leaves positions unchanged: compare forces at shared positions.
@@ -116,7 +125,7 @@ def main():
                 summary=timing_summary(samples,args.steps)
                 mean=summary['mean_seconds_per_step']*1000
                 row=dict(bodies=count,solver=solver,threads=threads,steps=args.steps,dt=args.dt,
-                         theta=args.theta if key=='theta' else '',order=args.order if key=='order' else '',
+                         theta=value if key=='theta' else '',order=args.order if key=='order' else '',
                          samples=args.samples,mean_ms_per_step=mean,
                          stddev_ms_per_step=summary['stddev_seconds_per_step']*1000,
                          force_relative_l2=force_error['relative_l2_error'],force_rms=force_error['rms_error'],
@@ -130,32 +139,34 @@ def main():
                              solver_totals=metadata(stderr,'solver_totals'),**summary)
                 (folder/'status.json').write_text(json.dumps(details,indent=2)+'\n')
                 write_csv(out/'comparison.csv',list(rows[0]),rows)
-                print(f'{count:6d} {solver:21s} threads={threads:2d}: {mean:9.4f} ms/step; '
+                print(f'{count:6d} {solver:21s} threads={threads:2d} {key}={value}: {mean:9.4f} ms/step; '
                       f'force rel.L2={row["force_relative_l2"]:.3g}; position RMS={row["position_rms"]:.3g}',flush=True)
         scaling=[]
         for count in args.bodies:
-            group=[r for r in rows if r['bodies']==count and r['solver']=='parallel-barnes-hut']
-            baseline=next(r['mean_ms_per_step'] for r in group if r['threads']==1)
-            for r in sorted(group,key=lambda r:r['threads']):
-                speedup=baseline/r['mean_ms_per_step']
-                scaling.append(dict(bodies=count,threads=r['threads'],mean_ms_per_step=r['mean_ms_per_step'],
-                                    speedup_vs_1thread=speedup,parallel_efficiency=speedup/r['threads']))
+            for opening in thetas:
+                group=[r for r in rows if r['bodies']==count and r['solver']=='parallel-barnes-hut' and r['theta']==opening]
+                baseline=next(r['mean_ms_per_step'] for r in group if r['threads']==1)
+                for r in sorted(group,key=lambda r:r['threads']):
+                    speedup=baseline/r['mean_ms_per_step']
+                    scaling.append(dict(bodies=count,theta=opening,threads=r['threads'],mean_ms_per_step=r['mean_ms_per_step'],
+                                        speedup_vs_1thread=speedup,parallel_efficiency=speedup/r['threads']))
         write_csv(out/'scaling.csv',list(scaling[0]),scaling)
-        report=['# Four-solver comparison','',
-                f'Theta {args.theta} for both Barnes-Hut solvers; FMM order {args.order}.',
-                f'{args.samples} samples, {args.warmups} warmups, {args.steps} Euler steps, dt={args.dt}.',
+        report=['# Solver comparison / theta sweep','',
+                f'Theta values {thetas} for both Barnes-Hut solvers; FMM order {args.order} (when included).',
+                f'{args.samples} samples, {args.warmups} warmups, {args.steps} {args.integrator} steps, dt={args.dt}.',
                 'Serial solvers use one thread. Only parallel Barnes-Hut uses multiple threads.',
+                'Leapfrog includes an initial force evaluation and then one per step; Euler uses supplied initial acceleration.',
                 'Timing includes integration and all tree/force work; excludes setup/reset/I/O.',
                 'Force error is measured at shared initial positions; trajectory error against direct n2.',
-                '', '| Bodies | Solver | Threads | ms/step | Force relative L2 | Position RMS |',
-                '|---|---|---|---|---|---|']
-        for r in sorted(rows,key=lambda r:(r['bodies'],r['solver'],r['threads'])):
+                '', '| Bodies | Solver | Threads | Theta | ms/step | Force relative L2 | Position RMS |',
+                '|---|---|---|---|---|---|---|']
+        for r in sorted(rows,key=lambda r:(r['bodies'],r['solver'],str(r['theta']),r['threads'])):
             report.append(f'| {r["bodies"]} | {r["solver"]} | {r["threads"]} | '
-                          f'{r["mean_ms_per_step"]:.4f} | {r["force_relative_l2"]:.3g} | {r["position_rms"]:.3g} |')
-        report+=['','## Strong scaling','','| Bodies | Threads | Speedup vs 1 thread | Efficiency |',
-                 '|---|---|---|---|']
+                          f'{r["theta"]} | {r["mean_ms_per_step"]:.4f} | {r["force_relative_l2"]:.3g} | {r["position_rms"]:.3g} |')
+        report+=['','## Strong scaling','','| Bodies | Theta | Threads | Speedup vs 1 thread | Efficiency |',
+                 '|---|---|---|---|---|']
         for r in scaling:
-            report.append(f'| {r["bodies"]} | {r["threads"]} | {r["speedup_vs_1thread"]:.2f} | {r["parallel_efficiency"]:.1%} |')
+            report.append(f'| {r["bodies"]} | {r["theta"]} | {r["threads"]} | {r["speedup_vs_1thread"]:.2f} | {r["parallel_efficiency"]:.1%} |')
         report+=['','These results describe this uniform distribution and machine, not a universal ranking.',
                  'Equal theta does not imply equal accuracy. Scaling may saturate or regress at higher thread counts.',
                  'Workspace is prepared once and reused across warmups and samples, as in the existing benchmark driver.']

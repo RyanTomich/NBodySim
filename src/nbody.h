@@ -55,4 +55,10 @@ typedef void (*AccelerationSolver)(const SimulationView *state, double *ax,
 void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
                           AccelerationSolver solver, void *context);
 
+/* Kick-drift-kick for position-dependent forces. Recomputes initial acceleration
+ * and makes steps+1 solver calls. No allocation. Zero steps/count is a no-op.
+ * Views expire after integration; supplied accelerations are ignored. */
+void simulate_leapfrog_with_solver(Simulation *simulation, double dt, size_t steps,
+                                   AccelerationSolver solver, void *context);
+
 #endif
