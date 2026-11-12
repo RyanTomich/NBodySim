@@ -5,3 +5,8 @@ __pycache__/
 
 # Generated benchmark inputs; keep the curated 1000.txt instance tracked.
 /bench/data/instance-*.txt
+
+# Paper figures are regenerated from saved results; keep figures/plot.py tracked.
+/figures/*.pdf
+/figures/*.svg
+/figures/*.png

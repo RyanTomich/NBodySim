@@ -9,7 +9,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 from compare_native import configurations_for, samples_for, summarize
-from plot_comparison import load_comparison, SERIES
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "figures"))
+from plot import load_comparison, SERIES
 from run import write_csv, write_json
 
 

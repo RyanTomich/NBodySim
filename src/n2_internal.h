@@ -3,7 +3,7 @@
 
 #include "nbody.h"
 
-/* Evaluate each unordered pair once, accumulating in source-index order.
+/* Serial kernel: evaluate each unordered pair once in source-index order.
  * Outputs need not be initialized and must be disjoint from each other and state.
  * State is read-only; coincident positions contribute zero. No allocation.
  */

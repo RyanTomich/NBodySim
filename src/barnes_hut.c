@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "parse.h"
 #include "solver_internal.h"
 #include "octree_internal.h"
@@ -14,6 +16,26 @@
 #endif
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+/* Experiment-only instrumentation: no timers or extra metadata in normal builds.
+ * Worker timers are private. After joining, divide their sum by the actual
+ * team size to attribute elapsed time without double-counting overlap. */
+#ifdef NBODY_PROFILE_BH
+#include <time.h>
+static uint64_t profile_now(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        abort();
+    }
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
+}
+#define PROFILE_START(name) uint64_t name = profile_now()
+#define PROFILE_ADD(destination, start) ((destination) += (double)(profile_now() - (start)) * 1e-9)
+#else
+#define PROFILE_START(name) ((void)0)
+#define PROFILE_ADD(destination, start) ((void)0)
 #endif
 
 /* Positive-mass source summary, separate from spatial tree geometry.
@@ -34,13 +56,24 @@ typedef struct {
 typedef struct {
     size_t calls, capacity_limited_leaves;
     size_t source_node_visits, direct_evaluations, aggregate_evaluations;
+#ifdef NBODY_PROFILE_BH
+    size_t membership_checks, tree_builds, tree_reuses;
+    size_t worker_slots, min_threads, max_threads;
+    double membership_seconds, construction_seconds, summaries_seconds;
+    double bounds_seconds, traversal_seconds, force_seconds, evaluation_seconds;
+    double bounds_worker_seconds, traversal_worker_seconds, force_worker_seconds;
+#endif
 } BarnesHutTotals;
 
 typedef struct {
     /* Node indices shared by all targets in one leaf: leaves are evaluated
      * directly, accepted internal nodes through their monopoles. */
-    size_t *source_nodes;
+    size_t *source_nodes; /* Borrowed slice of workspace source storage. */
+    size_t source_count;
     size_t source_node_visits, direct_evaluations, aggregate_evaluations;
+#ifdef NBODY_PROFILE_BH
+    double bounds_seconds, traversal_seconds, force_seconds;
+#endif
 } BarnesHutWorker;
 
 typedef struct {
@@ -48,6 +81,7 @@ typedef struct {
     Octree tree;
     GravityMonopole *monopoles;
     BarnesHutWorker *workers;
+    size_t *source_storage;
     int worker_count; /* Fixed at preparation, including for later runtime changes. */
     bool topology_usable;
     BarnesHutTotals totals; /* Cumulative over the prepared solver's lifetime. */
@@ -92,10 +126,28 @@ static Vec3 gravity_monopole_acceleration(const GravityMonopole *monopole, Vec3 
 
 static bool ensure_topology(const SimulationView *state, BarnesHutWorkspace *workspace)
 {
-    if (!workspace->topology_usable
-        || !octree_membership_is_valid(state, &workspace->tree)) {
-        workspace->topology_usable = octree_build(state, &workspace->tree);
+    bool reusable = workspace->topology_usable;
+    if (reusable) {
+        PROFILE_START(check_start);
+        reusable = octree_membership_is_valid(state, &workspace->tree);
+        PROFILE_ADD(workspace->totals.membership_seconds, check_start);
+#ifdef NBODY_PROFILE_BH
+        ++workspace->totals.membership_checks;
+#endif
     }
+    if (!reusable) {
+        PROFILE_START(build_start);
+        workspace->topology_usable = octree_build(state, &workspace->tree);
+        PROFILE_ADD(workspace->totals.construction_seconds, build_start);
+#ifdef NBODY_PROFILE_BH
+        ++workspace->totals.tree_builds;
+#endif
+    }
+#ifdef NBODY_PROFILE_BH
+    else {
+        ++workspace->totals.tree_reuses;
+    }
+#endif
     return workspace->topology_usable;
 }
 
@@ -186,7 +238,7 @@ static bool accept_source(const OctreeNode *source, const GravityMonopole *monop
 
 static void collect_source_nodes(const BarnesHutWorkspace *workspace, BarnesHutWorker *worker,
                                  size_t index, const OctreeNode *target_leaf,
-                                 const TargetLeafBounds *bounds, size_t *source_count)
+                                 const TargetLeafBounds *bounds)
 {
     const OctreeNode *node = &workspace->tree.nodes[index];
     ++worker->source_node_visits;
@@ -194,33 +246,39 @@ static void collect_source_nodes(const BarnesHutWorkspace *workspace, BarnesHutW
     if (node->is_leaf || (disjoint && accept_source(node, &workspace->monopoles[index],
                                                   bounds, workspace->theta))) {
         /* Disjoint, nonempty source ranges bound the list length by count. */
-        assert(*source_count < workspace->tree.count);
-        worker->source_nodes[(*source_count)++] = index;
+        assert(worker->source_count < workspace->tree.count);
+        worker->source_nodes[worker->source_count++] = index;
+        size_t targets = target_leaf->end - target_leaf->begin;
+        if (node->is_leaf) {
+            /* Source leaves are identical to or disjoint from the target leaf. */
+            worker->direct_evaluations += targets * (node->end - node->begin)
+                                       - (node == target_leaf ? targets : 0);
+        } else {
+            worker->aggregate_evaluations += targets;
+        }
         return;
     }
     for (size_t c = 0; c < 8; ++c) {
         if (node->children[c] != SIZE_MAX) {
-            collect_source_nodes(workspace, worker, node->children[c], target_leaf, bounds, source_count);
+            collect_source_nodes(workspace, worker, node->children[c], target_leaf, bounds);
         }
     }
 }
 
 static void evaluate_target_leaf(const SimulationView *state, double *ax, double *ay,
                                  double *az, const BarnesHutWorkspace *workspace,
-                                 BarnesHutWorker *worker,
-                                 const OctreeNode *target_leaf, size_t source_count)
+                                 const BarnesHutWorker *worker,
+                                 const OctreeNode *target_leaf)
 {
     const size_t *source_nodes = worker->source_nodes;
     for (size_t p = target_leaf->begin; p < target_leaf->end; ++p) {
         size_t target = workspace->tree.indices[p];
         Vec3 sum = {0};
-        for (size_t entry = 0; entry < source_count; ++entry) {
+        for (size_t entry = 0; entry < worker->source_count; ++entry) {
             const OctreeNode *node = &workspace->tree.nodes[source_nodes[entry]];
             if (node->is_leaf) {
                 sum = gravity_accumulate_sources(state, target, workspace->tree.indices,
                                                  node->begin, node->end, sum);
-                worker->direct_evaluations += (node->end - node->begin)
-                                           - (node->begin <= p && p < node->end);
             } else {
                 const GravityMonopole *monopole = &workspace->monopoles[source_nodes[entry]];
                 Vec3 contribution = gravity_monopole_acceleration(monopole,
@@ -228,7 +286,6 @@ static void evaluate_target_leaf(const SimulationView *state, double *ax, double
                 sum.x += contribution.x;
                 sum.y += contribution.y;
                 sum.z += contribution.z;
-                ++worker->aggregate_evaluations;
             }
         }
         ax[target] = sum.x;
@@ -237,22 +294,52 @@ static void evaluate_target_leaf(const SimulationView *state, double *ax, double
     }
 }
 
-static void evaluate_target_leaves(const SimulationView *state, double *ax, double *ay,
-                                   double *az, BarnesHutWorkspace *workspace,
-                                   BarnesHutTotals *evaluation)
+static void accumulate_worker_totals(BarnesHutWorkspace *workspace, int actual_workers)
 {
-    for (int i = 0; i < workspace->worker_count; ++i) {
-        workspace->workers[i].source_node_visits = 0;
-        workspace->workers[i].direct_evaluations = 0;
-        workspace->workers[i].aggregate_evaluations = 0;
+    BarnesHutTotals *totals = &workspace->totals;
+    assert(actual_workers > 0 && actual_workers <= workspace->worker_count);
+#ifdef NBODY_PROFILE_BH
+    size_t team_size = (size_t)actual_workers;
+    totals->worker_slots += team_size;
+    if (totals->min_threads == 0 || team_size < totals->min_threads) {
+        totals->min_threads = team_size;
     }
+    if (team_size > totals->max_threads) {
+        totals->max_threads = team_size;
+    }
+#endif
+    for (int i = 0; i < actual_workers; ++i) {
+        const BarnesHutWorker *worker = &workspace->workers[i];
+        totals->source_node_visits += worker->source_node_visits;
+        totals->direct_evaluations += worker->direct_evaluations;
+        totals->aggregate_evaluations += worker->aggregate_evaluations;
+#ifdef NBODY_PROFILE_BH
+        /* Keep raw worker time and normalize each call by its actual team size.
+         * The enclosing wall-time residual includes idle and scheduling time. */
+        totals->bounds_worker_seconds += worker->bounds_seconds;
+        totals->traversal_worker_seconds += worker->traversal_seconds;
+        totals->force_worker_seconds += worker->force_seconds;
+        totals->bounds_seconds += worker->bounds_seconds / actual_workers;
+        totals->traversal_seconds += worker->traversal_seconds / actual_workers;
+        totals->force_seconds += worker->force_seconds / actual_workers;
+#endif
+    }
+}
+
+static void evaluate_target_leaves(const SimulationView *state, double *ax, double *ay,
+                                   double *az, BarnesHutWorkspace *workspace)
+{
+    int actual_workers = 1;
 #ifdef _OPENMP
-#pragma omp parallel num_threads(workspace->worker_count) default(none) shared(state, ax, ay, az, workspace)
+#pragma omp parallel num_threads(workspace->worker_count) default(none) shared(state, ax, ay, az, workspace, actual_workers)
 #endif
     {
         int worker_index = 0;
 #ifdef _OPENMP
         worker_index = omp_get_thread_num();
+        if (worker_index == 0) {
+            actual_workers = omp_get_num_threads();
+        }
 #endif
         /* Keep hot counters local so workers do not repeatedly share cache lines. */
         BarnesHutWorker worker = {.source_nodes = workspace->workers[worker_index].source_nodes};
@@ -263,21 +350,21 @@ static void evaluate_target_leaves(const SimulationView *state, double *ax, doub
         for (size_t n = 0; n < workspace->tree.node_count; ++n) {
             const OctreeNode *target_leaf = &workspace->tree.nodes[n];
             if (target_leaf->is_leaf) {
+                PROFILE_START(bounds_start);
                 TargetLeafBounds bounds = compute_target_leaf_bounds(state, workspace, target_leaf);
-                size_t source_count = 0;
-                collect_source_nodes(workspace, &worker, 0, target_leaf, &bounds, &source_count);
-                evaluate_target_leaf(state, ax, ay, az, workspace, &worker, target_leaf, source_count);
+                PROFILE_ADD(worker.bounds_seconds, bounds_start);
+                worker.source_count = 0;
+                PROFILE_START(traversal_start);
+                collect_source_nodes(workspace, &worker, 0, target_leaf, &bounds);
+                PROFILE_ADD(worker.traversal_seconds, traversal_start);
+                PROFILE_START(force_start);
+                evaluate_target_leaf(state, ax, ay, az, workspace, &worker, target_leaf);
+                PROFILE_ADD(worker.force_seconds, force_start);
             }
         }
-        workspace->workers[worker_index].source_node_visits = worker.source_node_visits;
-        workspace->workers[worker_index].direct_evaluations = worker.direct_evaluations;
-        workspace->workers[worker_index].aggregate_evaluations = worker.aggregate_evaluations;
+        workspace->workers[worker_index] = worker;
     }
-    for (int i = 0; i < workspace->worker_count; ++i) {
-        evaluation->source_node_visits += workspace->workers[i].source_node_visits;
-        evaluation->direct_evaluations += workspace->workers[i].direct_evaluations;
-        evaluation->aggregate_evaluations += workspace->workers[i].aggregate_evaluations;
-    }
+    accumulate_worker_totals(workspace, actual_workers);
 }
 
 static void invalidate_accelerations(size_t count, double *ax, double *ay, double *az)
@@ -288,15 +375,6 @@ static void invalidate_accelerations(size_t count, double *ax, double *ay, doubl
     }
 }
 
-static void record_evaluation(BarnesHutWorkspace *workspace, const BarnesHutTotals *evaluation)
-{
-    workspace->totals.calls += evaluation->calls;
-    workspace->totals.capacity_limited_leaves += evaluation->capacity_limited_leaves;
-    workspace->totals.source_node_visits += evaluation->source_node_visits;
-    workspace->totals.direct_evaluations += evaluation->direct_evaluations;
-    workspace->totals.aggregate_evaluations += evaluation->aggregate_evaluations;
-}
-
 static void gravity_barnes_hut(const SimulationView *state, double *ax, double *ay,
                               double *az, void *solver_context)
 {
@@ -305,16 +383,23 @@ static void gravity_barnes_hut(const SimulationView *state, double *ax, double *
         return;
     }
     assert(workspace && workspace->tree.count == state->count && workspace->tree.nodes);
-    BarnesHutTotals evaluation = {.calls = 1};
-    if (ensure_topology(state, workspace) && refresh_monopoles(state, workspace)) {
-        evaluate_target_leaves(state, ax, ay, az, workspace, &evaluation);
+    ++workspace->totals.calls;
+    bool valid = ensure_topology(state, workspace);
+    if (valid) {
+        PROFILE_START(summaries_start);
+        valid = refresh_monopoles(state, workspace);
+        PROFILE_ADD(workspace->totals.summaries_seconds, summaries_start);
+    }
+    if (valid) {
+        PROFILE_START(evaluation_start);
+        evaluate_target_leaves(state, ax, ay, az, workspace);
+        PROFILE_ADD(workspace->totals.evaluation_seconds, evaluation_start);
     } else {
         invalidate_accelerations(state->count, ax, ay, az);
     }
     /* Count the current topology's limited leaves on every evaluation,
      * including evaluations which reuse it. */
-    evaluation.capacity_limited_leaves = workspace->tree.capacity_limited_leaves;
-    record_evaluation(workspace, &evaluation);
+    workspace->totals.capacity_limited_leaves += workspace->tree.capacity_limited_leaves;
 }
 
 static void barnes_hut_destroy(void *solver_context)
@@ -323,11 +408,7 @@ static void barnes_hut_destroy(void *solver_context)
     if (!workspace) {
         return;
     }
-    if (workspace->workers) {
-        for (int i = 0; i < workspace->worker_count; ++i) {
-            free(workspace->workers[i].source_nodes);
-        }
-    }
+    free(workspace->source_storage);
     free(workspace->workers);
     octree_destroy(&workspace->tree);
     free(workspace->monopoles);
@@ -385,19 +466,21 @@ static bool barnes_hut_create(void **solver_context, size_t count, const SolverO
 #endif
     if (workspace->worker_count <= 0 ||
         (size_t)workspace->worker_count > SIZE_MAX / sizeof(*workspace->workers) ||
-        count > SIZE_MAX / sizeof(*workspace->workers->source_nodes)) {
+        count > SIZE_MAX / sizeof(*workspace->source_storage) / (size_t)workspace->worker_count) {
         goto allocation_failure;
     }
     workspace->workers = calloc((size_t)workspace->worker_count, sizeof(*workspace->workers));
     if (!workspace->workers) {
         goto allocation_failure;
     }
-    for (int i = 0; i < workspace->worker_count; ++i) {
-        if (count != 0) {
-            workspace->workers[i].source_nodes = malloc(count * sizeof(*workspace->workers[i].source_nodes));
-            if (!workspace->workers[i].source_nodes) {
-                goto allocation_failure;
-            }
+    if (count != 0) {
+        workspace->source_storage = malloc((size_t)workspace->worker_count * count
+                                            * sizeof(*workspace->source_storage));
+        if (!workspace->source_storage) {
+            goto allocation_failure;
+        }
+        for (int i = 0; i < workspace->worker_count; ++i) {
+            workspace->workers[i].source_nodes = workspace->source_storage + (size_t)i * count;
         }
     }
     workspace->theta = config.theta;
@@ -428,7 +511,29 @@ static void barnes_hut_diagnostics(const void *solver_context, MetadataVisitor v
     REPORT(source_node_visits);
     REPORT(direct_evaluations);
     REPORT(aggregate_evaluations);
+#ifdef NBODY_PROFILE_BH
+    REPORT(membership_checks);
+    REPORT(tree_builds);
+    REPORT(tree_reuses);
+    REPORT(worker_slots);
+    REPORT(min_threads);
+    REPORT(max_threads);
+#endif
 #undef REPORT
+#ifdef NBODY_PROFILE_BH
+#define REPORT_TIME(field) visit(#field, (MetadataValue){METADATA_DOUBLE, {.real = totals->field}}, visitor_context)
+    REPORT_TIME(membership_seconds);
+    REPORT_TIME(construction_seconds);
+    REPORT_TIME(summaries_seconds);
+    REPORT_TIME(bounds_seconds);
+    REPORT_TIME(traversal_seconds);
+    REPORT_TIME(force_seconds);
+    REPORT_TIME(evaluation_seconds);
+    REPORT_TIME(bounds_worker_seconds);
+    REPORT_TIME(traversal_worker_seconds);
+    REPORT_TIME(force_worker_seconds);
+#undef REPORT_TIME
+#endif
 }
 
 const SolverDescriptor barnes_hut_solver = {

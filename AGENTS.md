@@ -10,8 +10,8 @@ solvers need not beat `n2` on small inputs. Evaluate numerical differences and
 runtime together using the same saved initial state, timestep, and step count.
 
 The implementation is C17, serial by default, with optional OpenMP parallel
-leapfrog body updates and Barnes–Hut target-leaf evaluation. Serial builds need
-no external C libraries beyond the math library; OpenMP builds also need
+leapfrog body updates, triangular `n2` pair evaluation, Barnes–Hut target-leaf
+evaluation, and FMM root-target interactions. Serial builds need no external C libraries beyond the math library; OpenMP builds also need
 compiler/runtime support.
 Building requires Make and a C compiler; generation and benchmarking
 use Python 3.8+ and its standard library. See `README.md` for usage and
@@ -29,7 +29,10 @@ solvers, Barnes–Hut and FMM.
   Keep representation details in `*_internal.h`; executables use public headers.
 - `src/gravity.c` and `src/gravity_internal.h` provide shared direct gravity interactions and source-range accumulation.
   `src/barnes_hut.c` owns its private mass monopoles and their construction/evaluation helpers.
-- `src/n2.c` implements the all-pairs solver; `src/n2_internal.h` exposes its kernel for FMM fallbacks. Barnes–Hut has no all-pairs fallback; unrepresentable tree bounds or mass summaries produce `NaN` accelerations.
+- `src/n2.c` implements the all-pairs solver, including reusable private OpenMP
+  acceleration buffers; `src/n2_internal.h` exposes the unchanged serial kernel
+  for FMM fallbacks. Barnes–Hut has no all-pairs fallback; unrepresentable tree
+  bounds or mass summaries produce `NaN` accelerations.
 - `src/io.*` handles instance files.
 - `src/octree.c` builds the bounded octree used by `src/barnes_hut.c` and `src/fmm.c`.
   Barnes–Hut validates every leaf member before reusing topology and refreshes
@@ -43,6 +46,10 @@ solvers, Barnes–Hut and FMM.
   behavior, and `tests/test_bench.sh` checks benchmark resets and failure handling.
 - `bench/driver.c` measures simulation calls and reports backend settings;
   `bench/run.py` orchestrates timing, optional `--compare-n2` comparisons, and saved results.
+- `figures/plot.py` is the single figure-generation entry point. It accepts saved
+  data paths, applies the shared paper style, and writes all figures as 600-dpi PNGs
+  directly to `figures/`. Add new figure types there; do not add plotting scripts
+  under `bench/` or `results/`. Keep raw experiment data in `results/`.
 - `tests/data/` holds regression fixtures; `bench/data/` holds benchmark inputs.
   Generated `bench/data/instance-*.txt` files are ignored. Keep persistent benchmark
   artifacts in ignored `results/`.
@@ -93,14 +100,24 @@ every target and requires compiler/linker support; failures do not silently
 disable it. Use `make LTO=0` for a non-LTO build, cleaning before switching
 settings. `make print-config` reports the selected LTO setting and flags.
 `OPENMP=0` is the default; use `make OPENMP=1` for parallel leapfrog body updates
-with every solver and Barnes–Hut force evaluation, with `OMPFLAGS`/`OMPLIBS`
+with every solver and `n2`/Barnes–Hut/FMM force evaluation, with `OMPFLAGS`/`OMPLIBS`
 overrides as described in `README.md`.
 Clean before changing OpenMP settings. Set `OMP_NUM_THREADS` before solver
-creation: each prepared Barnes–Hut solver reserves that maximum worker count,
-with one count-element source buffer per worker. A prepared solver must not be
-called concurrently. Tree construction, aggregation, and `n2`/FMM force evaluation
-stay serial. Leapfrog uses static parallel loops for half-kick/drift and final
-half-kick, with implicit synchronization before and after the single force call
+creation: prepared `n2` and Barnes–Hut solvers reserve that maximum worker count.
+Barnes–Hut uses one count-element source buffer per worker. With multiple workers
+and at least two bodies, `n2` uses three count-element double arrays per worker
+(approximately `24 × N × T` bytes), evaluates each unordered pair once into
+private arrays, then combines participating workers in ascending index order.
+Smaller runtime teams are safe; single-thread execution uses the original serial
+kernel. Parallel `n2` changes summation order, so compare thread counts with
+numerical tolerances rather than bitwise equality. A prepared solver must not be
+called concurrently. FMM reads the current thread setting on each evaluation;
+at least 1,024 bodies and two occupied root children enable one parallel loop
+over disjoint target subtrees, capped at eight workers. Jobs use stack-local
+scratch and retain source accumulation order. Uneven subtrees limit scaling.
+Tree construction, aggregation, FMM upward/downward passes, and FMM direct
+fallbacks stay serial. Leapfrog uses static parallel loops for
+half-kick/drift and final half-kick, with implicit synchronization before and after the single force call
 outside those regions. Preserve that ordering and benchmark complete simulation
 time: the two parallel-region launches per step can cost more than they save on
 small inputs.

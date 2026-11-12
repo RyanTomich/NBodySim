@@ -66,10 +66,24 @@ for solver in ("n2", "barnes-hut", "fmm"):
                 "theta", "bucket_capacity", "max_depth", "node_capacity"
             }
             assert status["diagnostics"]["calls"] == (args.steps + 1) * (args.samples + args.warmups)
-            assert set(status["diagnostics"]) == {
+            expected = {
                 "calls", "capacity_limited_leaves",
                 "source_node_visits", "direct_evaluations", "aggregate_evaluations", "scope"
             }
+            if "membership_seconds" in status["diagnostics"]:
+                import sys
+                sys.path.insert(0, "bench")
+                from profile_barnes_hut import phase_samples, summarize, COUNTERS, TIMERS, WORKER_TIMERS
+                expected.update(COUNTERS)
+                expected.update(TIMERS)
+                expected.update(WORKER_TIMERS)
+                expected.update(("evaluation_seconds", "min_threads", "max_threads"))
+                rows = phase_samples(folder / "timing", args.steps, args.samples)
+                assert len(rows) == args.samples
+                assert all(row["tree_reuses"] == args.steps + 1 for row in rows)
+                assert all(row["tree_builds"] == 0 for row in rows)
+                assert abs(sum(row["percent_of_total"] for row in summarize(rows, args.steps)) - 100) < 1e-9
+            assert set(status["diagnostics"]) == expected
         assert runner["compare_n2"](binary, instance, folder, args)
         for mode in ("timing", "reference"):
             saved = json.loads((folder / mode / "status.json").read_text())

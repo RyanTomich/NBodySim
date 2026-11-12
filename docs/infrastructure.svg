@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1400" height="1250" viewBox="0 0 1400 1250" role="img" aria-labelledby="title desc">
 <title id="title">N-body supporting infrastructure workflow</title>
-<desc id="desc">Read top to bottom. Manual order-four code generation feeds the simulator, whose module diagram is linked. The Makefile builds the application, tests and benchmark binary. Validation branches left to C contract and CLI tests, using fixtures and an independent reference. Benchmarking branches right: bench/run.py rebuilds and archives the binary, then launches bench/driver.c with curated or generated benchmark inputs. The driver times only simulation calls. The runner collects samples, summaries, states and logs in results. plot_results.py reads saved runs and produces runtime and speedup figures in plots.</desc>
+<desc id="desc">Read top to bottom. Manual order-four code generation feeds the simulator, whose module diagram is linked. The Makefile builds the application, tests and benchmark binary. Validation branches left to C contract and CLI tests, using fixtures and an independent reference. Benchmarking branches right: bench/run.py rebuilds and archives the binary, then launches bench/driver.c with curated or generated benchmark inputs. The driver times only simulation calls. The runner collects samples, summaries, states and logs in results. figures/plot.py reads saved data paths and produces phase-share, runtime, speedup and comparison figures in figures, using a shared paper style and 600-dpi PNG output.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#64748b"/></marker></defs>
 <rect width="1400" height="1250" fill="white"/>
 <style>text{font-family:Arial,Helvetica,sans-serif;fill:#1e293b}.title{font-size:28px;font-weight:bold}.name{font-size:21px;font-weight:bold}.role{font-size:19px}.detail{font-size:16px;fill:#475569}.edge{font-size:16px;fill:#475569;paint-order:stroke;stroke:white;stroke-width:7px}</style>
@@ -64,8 +64,8 @@
 <text x="850.0" y="1005" class="detail" text-anchor="middle">Binary, inputs, samples, summaries and logs</text>
 </g>
 <g id="plots"><rect x="630" y="1080" width="440" height="105" rx="8" fill="#ecfdf5" stroke="#6aa88b" stroke-width="1.5"/>
-<text x="850.0" y="1109" class="name" text-anchor="middle">plot_results.py → plots/</text>
-<text x="850.0" y="1137" class="role" text-anchor="middle">runtime and speedup figures</text>
-<text x="850.0" y="1165" class="detail" text-anchor="middle">Saved timings normalized by step count</text>
+<text x="850.0" y="1109" class="name" text-anchor="middle">figures/plot.py → figures/</text>
+<text x="850.0" y="1137" class="role" text-anchor="middle">Paper figures: phases, timing, comparisons</text>
+<text x="850.0" y="1165" class="detail" text-anchor="middle">Shared style · 600-dpi PNG</text>
 </g>
 </svg>

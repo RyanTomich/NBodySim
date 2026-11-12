@@ -3,6 +3,7 @@
 #include "solver.h"
 #include "io.h"
 #include "parse.h"
+#include "step_timing.h"
 
 #include <assert.h>
 #include <math.h>
@@ -11,6 +12,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef NBODY_BENCH_OPENMP
+#ifndef _OPENMP
+#error "The parallel solver sweep requires OpenMP support"
+#endif
+#include <omp.h>
+#endif
+
+#ifdef NBODY_BENCH_STEPS
+#if defined(_OPENMP) && !defined(NBODY_BENCH_OPENMP)
+#error "The single-run solver sweep requires a serial build"
+#endif
+static struct timespec *step_boundaries;
+static bool step_clock_failed;
+
+void benchmark_step_boundary(size_t boundary)
+{
+    if (clock_gettime(CLOCK_MONOTONIC, &step_boundaries[boundary]) != 0) {
+        step_clock_failed = true;
+    }
+}
+#endif
 
 /* Reset logical state through fresh views; inactive workspace is overwritten by
  * the solver. The driver owns distinct, equally sized initial and working states. */
@@ -105,6 +128,20 @@ static void metadata_log(FILE *output, const Solver *solver, bool diagnostics)
     }
 }
 
+#ifdef NBODY_PROFILE_BH
+/* Snapshots stay outside the measured call; differences exclude warmups.
+ * Use the public metadata interface, not backend workspace representation. */
+static void profile_snapshot(const Solver *solver, size_t sample, const char *boundary)
+{
+    JsonWriter writer = {.output = stderr};
+    fputs("phase_sample: {", stderr);
+    json_field("sample", (MetadataValue){METADATA_SIZE, {.size = sample}}, &writer);
+    json_field("boundary", (MetadataValue){METADATA_STRING, {.string = boundary}}, &writer);
+    solver_diagnostics(solver, json_field, &writer);
+    fputs("}\n", stderr);
+}
+#endif
+
 static int metadata_query(int argc, char **argv)
 {
     if (argc == 0) {
@@ -137,9 +174,25 @@ static int metadata_query(int argc, char **argv)
     return fflush(stdout) == 0 && !ferror(stdout) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-/* Internal CLI used by run.py. stdout contains timing samples only. */
+/* Internal CLI used by benchmark runners. */
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "--build-info") == 0) {
+        puts("{\"openmp\": "
+#ifdef _OPENMP
+             "true"
+#else
+             "false"
+#endif
+             ", \"instrumented\": "
+#if defined(NBODY_BENCH_STEPS) || defined(NBODY_PROFILE_BH)
+             "true"
+#else
+             "false"
+#endif
+             "}");
+        return fflush(stdout) == 0 && !ferror(stdout) ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
     if (argc >= 2 && strcmp(argv[1], "--metadata") == 0) {
         return metadata_query(argc - 2, argv + 2);
     }
@@ -184,12 +237,35 @@ int main(int argc, char **argv)
     Simulation *simulation;
     bool allocated = simulation_create(&simulation, simulation_view(initial).count);
     double *durations = malloc(samples * sizeof(*durations));
+#ifdef NBODY_BENCH_STEPS
+    if (steps >= SIZE_MAX / sizeof(*step_boundaries)
+        || !(step_boundaries = calloc(steps + 1, sizeof(*step_boundaries)))) {
+        fprintf(stderr, "Could not allocate step timing storage.\n");
+        goto cleanup;
+    }
+#endif
     if (!allocated || !durations) {
         fprintf(stderr, "Could not allocate benchmark state.\n");
         goto cleanup;
     }
 
     const char *error;
+#ifdef NBODY_BENCH_OPENMP
+    /* Check runtime team formation before preparation and outside timing. */
+    const int requested_threads = omp_get_max_threads();
+    int effective_threads = 1;
+#pragma omp parallel shared(effective_threads)
+    {
+#pragma omp single
+        effective_threads = omp_get_num_threads();
+    }
+    fprintf(stderr, "thread_check: {\"openmp\": true, \"requested_threads\": %d, \"effective_threads\": %d}\n",
+            requested_threads, effective_threads);
+    if (effective_threads != requested_threads || omp_get_dynamic()) {
+        fprintf(stderr, "Expected a fixed OpenMP team of %d threads.\n", requested_threads);
+        goto cleanup;
+    }
+#endif
     if (!solver_create(&solver, solver_name, simulation_view(initial).count,
                        &option, argc == 11 ? 1 : 0, &error)) {
         fprintf(stderr, "%s\n", error);
@@ -208,6 +284,11 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < samples; ++i) {
         reset_state(simulation, initial);
         struct timespec start, end;
+#ifdef NBODY_PROFILE_BH
+        if (timing) {
+            profile_snapshot(&solver, i + 1, "before");
+        }
+#endif
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
                 perror("clock_gettime");
@@ -225,6 +306,25 @@ int main(int argc, char **argv)
             durations[i] = (double)(end.tv_sec - start.tv_sec)
                 + (double)(end.tv_nsec - start.tv_nsec) * 1e-9;
         }
+#ifdef NBODY_BENCH_STEPS
+        if (step_clock_failed) {
+            fprintf(stderr, "Step clock failed.\n");
+            goto cleanup;
+        }
+        if (timing && simulation_view(simulation).count) {
+            for (size_t step = 0; step < steps; ++step) {
+                double seconds = (double)(step_boundaries[step + 1].tv_sec - step_boundaries[step].tv_sec)
+                    + (double)(step_boundaries[step + 1].tv_nsec - step_boundaries[step].tv_nsec) * 1e-9;
+                fprintf(stderr, "step_timing: {\"sample\": %zu, \"step\": %zu, \"seconds\": %.17g}\n",
+                        i + 1, step + 1, seconds);
+            }
+        }
+#endif
+#ifdef NBODY_PROFILE_BH
+        if (timing) {
+            profile_snapshot(&solver, i + 1, "after");
+        }
+#endif
         if (!state_is_finite(simulation_view(simulation))) {
             fprintf(stderr, "Sample %zu produced a nonfinite state.\n", i + 1);
             goto cleanup;
@@ -255,6 +355,9 @@ int main(int argc, char **argv)
     result = EXIT_SUCCESS;
 
 cleanup:
+#ifdef NBODY_BENCH_STEPS
+    free(step_boundaries);
+#endif
     if (solver.descriptor) {
         metadata_log(stderr, &solver, true);
     }

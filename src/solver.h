@@ -31,8 +31,8 @@ const char *solver_name_at(size_t index); /* NULL when out of range. */
  * Duplicate option names are rejected before backend preparation.
  * All allocation occurs here. Prepared solvers retain no state pointers and
  * must only evaluate views with the specified count. Do not copy ownership.
- * A prepared solver must not be called concurrently. OpenMP Barnes-Hut captures
- * the maximum thread count here; set OMP_NUM_THREADS before preparation.
+ * A prepared solver must not be called concurrently. OpenMP n2 and Barnes-Hut
+ * capture the maximum thread count here; set OMP_NUM_THREADS before preparation.
  */
 bool solver_create(Solver *solver, const char *name, size_t count,
                    const SolverOption *options, size_t option_count, const char **error);

@@ -142,6 +142,21 @@ static Simulation *check_force(Solver *solver, const ReferenceBody *bodies, size
     return s;
 }
 
+static void test_n2_first_row_initialization(void)
+{
+    const ReferenceBody bodies[] = {
+        {2, {0, 0, 0}, {0}, {0}},
+        {3, {0, 0, 0}, {0}, {0}},
+        {5, {1, 2, 3}, {0}, {0}}
+    };
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "n2", 3, NULL, 0, &error));
+    /* NaN-prefilled outputs must be initialized even when the first pair coincides. */
+    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
+    solver_destroy(&solver);
+}
+
 static void test_registered_solver_contract(void)
 {
     ReferenceBody bodies[CLOUD_SIZE];
@@ -399,6 +414,21 @@ static void test_gravity_accuracy(void)
                 bodies[i].position.x += 100;
             }
             simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            /* Distinct coincident bodies still count as direct evaluations. */
+            for (size_t i = 1; i < count; ++i) {
+                bodies[i].position = bodies[0].position;
+            }
+            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            if (variant) {
+                MetadataCheck direct = {.name = "direct_evaluations"};
+                MetadataCheck aggregates = {.name = "aggregate_evaluations"};
+                solver_diagnostics(&solver, find_metadata, &direct);
+                solver_diagnostics(&solver, find_metadata, &aggregates);
+                assert(direct.found && direct.value.type == METADATA_SIZE);
+                assert(direct.value.value.size == 3 * count * (count - 1));
+                assert(aggregates.found && aggregates.value.type == METADATA_SIZE);
+                assert(aggregates.value.value.size == 0);
+            }
             solver_destroy(&solver);
         }
     }
@@ -429,6 +459,209 @@ static void test_gravity_accuracy(void)
 }
 
 #ifdef _OPENMP
+static void test_fmm_thread_consistency(void)
+{
+    enum { COUNT = 1536 };
+    const struct { size_t count; int distribution; } cases[] = {
+        {1023, 0}, {1024, 0}, {COUNT, 0}, {COUNT, 1}, {COUNT, 2}, {COUNT, 3}
+    };
+    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
+    int saved_threads = omp_get_max_threads(), saved_dynamic = omp_get_dynamic();
+    omp_set_dynamic(0);
+    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+        size_t count = cases[c].count;
+        for (size_t order = 0; order < 6; ++order) {
+            ReferenceBody bodies[COUNT];
+            for (size_t i = 0; i < count; ++i) {
+                Vec3 point = {(double)(i % 13) - 6, (double)(i / 13 % 13) - 6,
+                              (double)(i / 169) - 4};
+                if (cases[c].distribution == 1) {
+                    double offset = i < count * 9 / 10 ? -20 : 20;
+                    point = (Vec3){offset + point.x * 0.1, point.y * 0.1, point.z * 0.1};
+                } else if (cases[c].distribution == 2) {
+                    point = (Vec3){0.125 * (double)i, i % 2 ? -10 : 10, 0};
+                } else if (cases[c].distribution == 3) {
+                    point = (Vec3){0, 0, 0};
+                }
+                bodies[i] = (ReferenceBody){1 + (double)(i % 3), point, {0.01, 0, 0}, {0}};
+            }
+            Solver solver;
+            SolverOption option = {"order", orders[order]};
+            const char *error;
+            /* FMM reads the runtime team setting on each evaluation. */
+            omp_set_num_threads(1);
+            assert(solver_create(&solver, "fmm", count, &option, 1, &error));
+            for (size_t run = 0; run < 2; ++run) {
+                Vec3 expected[COUNT];
+                reference_accelerations(bodies, count, expected);
+                Simulation *states[2];
+                double actual[2][3][COUNT];
+                for (size_t team = 0; team < 2; ++team) {
+                    omp_set_num_threads(team ? 4 : 1);
+                    states[team] = from_bodies(bodies, count);
+                    SimulationView view = simulation_view(states[team]);
+                    solver.acceleration(&view, actual[team][0], actual[team][1], actual[team][2],
+                                        solver.context);
+                    for (size_t i = 0; i < count; ++i) {
+                        assert_body(body_at(states[team], i), bodies[i], 0);
+                    }
+                    simulate_with_solver(states[team], 0.00001, 2, solver.acceleration, solver.context);
+                }
+                double error_norm = 0, reference_norm = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        assert_close(actual[1][axis][i], actual[0][axis][i], 0);
+                    }
+                    error_norm = hypot(error_norm, hypot(hypot(actual[0][0][i] - expected[i].x,
+                                      actual[0][1][i] - expected[i].y), actual[0][2][i] - expected[i].z));
+                    reference_norm = hypot(reference_norm, hypot(hypot(expected[i].x, expected[i].y),
+                                                                 expected[i].z));
+                    assert_body(body_at(states[0], i), body_at(states[1], i), 0);
+                    /* Reuse the solver with a new allocation, masses, and positions. */
+                    bodies[i].w *= 1.25;
+                    bodies[i].position.x *= 1.1;
+                    bodies[i].position.y += 0.25;
+                }
+                /* Fixture-specific accuracy budget, including order one. */
+                assert_close(error_norm, 0, 0.1 * (1 + reference_norm));
+                simulation_destroy(states[0]);
+                simulation_destroy(states[1]);
+            }
+            solver_destroy(&solver);
+        }
+    }
+    omp_set_num_threads(saved_threads);
+    omp_set_dynamic(saved_dynamic);
+}
+
+static void test_fmm_parallel_fallback(void)
+{
+    enum { COUNT = 1024 };
+    ReferenceBody bodies[COUNT];
+    int saved_threads = omp_get_max_threads(), saved_dynamic = omp_get_dynamic();
+    omp_set_dynamic(0);
+    omp_set_num_threads(4);
+    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
+    for (size_t order = 0; order < 6; ++order) {
+        Solver solver;
+        SolverOption option = {"order", orders[order]};
+        const char *error;
+        assert(solver_create(&solver, "fmm", COUNT, &option, 1, &error));
+        for (size_t run = 0; run < 2; ++run) {
+            /* Finite tree summaries, but overflowing distances between opposite
+             * corners fail during interactions. The next call must recover. */
+            double scale = run ? 1 : 8e307;
+            for (size_t i = 0; i < COUNT; ++i) {
+                bodies[i] = (ReferenceBody){1, {i & 1 ? scale : -scale,
+                                                i & 2 ? scale : -scale,
+                                                i & 4 ? scale : -scale}, {0}, {0}};
+            }
+            Simulation *state = from_bodies(bodies, COUNT);
+            SimulationView view = simulation_view(state);
+            double actual[3][COUNT], expected[3][COUNT];
+            solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+            omp_set_num_threads(1);
+            /* Failed calls match direct summation; recovery matches a fresh
+             * serial FMM, including the low-order approximation error. */
+            Solver reference;
+            assert(solver_create(&reference, run ? "fmm" : "n2", COUNT,
+                                 run ? &option : NULL, run ? 1 : 0, &error));
+            reference.acceleration(&view, expected[0], expected[1], expected[2], reference.context);
+            solver_destroy(&reference);
+            omp_set_num_threads(4);
+            for (size_t axis = 0; axis < 3; ++axis) {
+                for (size_t i = 0; i < COUNT; ++i) {
+                    if (!run) {
+                        assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
+                               || actual[axis][i] == expected[axis][i]);
+                    } else {
+                        assert_close(actual[axis][i], expected[axis][i], 0);
+                    }
+                }
+            }
+            MetadataCheck fallback = {.name = "direct_fallbacks"};
+            solver_diagnostics(&solver, find_metadata, &fallback);
+            assert(fallback.found && fallback.value.value.size == 1);
+            simulation_destroy(state);
+        }
+        solver_destroy(&solver);
+    }
+    omp_set_num_threads(saved_threads);
+    omp_set_dynamic(saved_dynamic);
+}
+
+static void test_n2_thread_consistency(void)
+{
+    int saved_threads = omp_get_max_threads();
+    int saved_dynamic = omp_get_dynamic();
+    int saved_levels = omp_get_max_active_levels();
+    omp_set_dynamic(0);
+    omp_set_max_active_levels(1);
+    const size_t counts[] = {0, 1, 2, 3, CLOUD_SIZE};
+    for (size_t c = 0; c < sizeof(counts) / sizeof(counts[0]); ++c) {
+        size_t count = counts[c];
+        ReferenceBody bodies[CLOUD_SIZE];
+        fill_cloud(bodies);
+        Solver solvers[2];
+        const char *error;
+        for (size_t team = 0; team < 2; ++team) {
+            omp_set_num_threads(team == 0 ? 1 : 4);
+            assert(solver_create(&solvers[team], "n2", count, NULL, 0, &error));
+        }
+        Simulation *previous = NULL;
+        for (size_t repeat = 0; repeat < 3; ++repeat) {
+            Vec3 expected[CLOUD_SIZE];
+            reference_accelerations(bodies, count, expected);
+            for (size_t team = 0; team < 2; ++team) {
+                /* Changing the runtime default cannot enlarge prepared storage
+                 * or change the single-worker solver into a parallel solver. */
+                omp_set_num_threads(team == 0 ? 4 : 1);
+                Simulation *state = check_force(&solvers[team], bodies, count, 1e-11);
+                SimulationView view = simulation_view(state);
+                double actual[3][CLOUD_SIZE];
+                solvers[team].acceleration(&view, actual[0], actual[1], actual[2], solvers[team].context);
+                for (size_t i = 0; i < count; ++i) {
+                    assert_close(actual[0][i], expected[i].x, 1e-11);
+                    assert_close(actual[1][i], expected[i].y, 1e-11);
+                    assert_close(actual[2][i], expected[i].z, 1e-11);
+                }
+                /* Keep the earlier allocation alive until after the next call. */
+                simulation_destroy(previous);
+                previous = state;
+            }
+            /* A nested region must serialize, even for a solver prepared for
+             * four workers. Scratch from the preceding call must be ignored. */
+#pragma omp parallel num_threads(2) default(none) shared(solvers, bodies, count)
+            {
+#pragma omp single
+                {
+                    simulation_destroy(check_force(&solvers[1], bodies, count, 1e-11));
+                }
+            }
+            for (size_t i = 0; i < count; ++i) {
+                bodies[i].w *= 1.5;
+                bodies[i].position.x += 0.03125 * (double)(i % 5);
+                bodies[i].position.z *= 1.125;
+            }
+        }
+        simulation_destroy(previous);
+        solver_destroy(&solvers[0]);
+        solver_destroy(&solvers[1]);
+    }
+    omp_set_num_threads(4);
+    Solver solver;
+    const char *error;
+    const size_t overflowing[] = {SIZE_MAX, SIZE_MAX / (3 * sizeof(double)) / 4 + 1};
+    for (size_t i = 0; i < sizeof(overflowing) / sizeof(overflowing[0]); ++i) {
+        assert(!solver_create(&solver, "n2", overflowing[i], NULL, 0, &error));
+        assert(error && !solver.context && !solver.descriptor && !solver.acceleration);
+        solver_destroy(&solver);
+    }
+    omp_set_max_active_levels(saved_levels);
+    omp_set_num_threads(saved_threads);
+    omp_set_dynamic(saved_dynamic);
+}
+
 static void test_trajectory_thread_consistency(void)
 {
     int saved_threads = omp_get_max_threads();
@@ -459,7 +692,7 @@ static void test_trajectory_thread_consistency(void)
             solver_destroy(&solver);
         }
         for (size_t i = 0; i < CLOUD_SIZE; ++i) {
-            assert_body(body_at(states[0], i), body_at(states[1], i), 0);
+            assert_body(body_at(states[0], i), body_at(states[1], i), backend == 0 ? 1e-11 : 0);
         }
         simulation_destroy(states[0]);
         simulation_destroy(states[1]);
@@ -472,7 +705,9 @@ static void test_barnes_hut_thread_consistency(void)
 {
     int saved_threads = omp_get_max_threads();
     int saved_dynamic = omp_get_dynamic();
+    int saved_levels = omp_get_max_active_levels();
     omp_set_dynamic(0);
+    omp_set_max_active_levels(1);
     ReferenceBody bodies[CLOUD_SIZE];
     fill_cloud(bodies);
     Simulation *state = from_bodies(bodies, CLOUD_SIZE);
@@ -505,13 +740,23 @@ static void test_barnes_hut_thread_consistency(void)
             }
         }
         double expected[3][CLOUD_SIZE], actual[3][CLOUD_SIZE];
-        /* Runtime changes after preparation must not overrun worker storage.
-         * Repeated calls also exercise counter resets and new leaf schedules. */
+        /* Runtime defaults cannot enlarge prepared storage. A nested call
+         * serializes, so stale statistics from inactive workers must be ignored. */
         for (size_t repeat = 0; repeat < 3; ++repeat) {
             omp_set_num_threads(4);
             solvers[0].acceleration(&view, expected[0], expected[1], expected[2], solvers[0].context);
             omp_set_num_threads(1);
-            solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context);
+            if (repeat == 1) {
+#pragma omp parallel num_threads(2) default(none) shared(solvers, view, actual)
+                {
+#pragma omp single
+                    {
+                        solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context);
+                    }
+                }
+            } else {
+                solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context);
+            }
             for (size_t axis = 0; axis < 3; ++axis) {
                 for (size_t i = 0; i < CLOUD_SIZE; ++i) {
                     assert(isfinite(actual[axis][i]));
@@ -533,10 +778,21 @@ static void test_barnes_hut_thread_consistency(void)
             MetadataCheck calls = {.name = "calls"};
             solver_diagnostics(&solvers[team], find_metadata, &calls);
             assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 4);
+#ifdef NBODY_PROFILE_BH
+            const char *profile_names[] = {"worker_slots", "min_threads", "max_threads"};
+            const size_t expected_profile[] = {team ? 13 : 4, 1, team ? 4 : 1};
+            for (size_t field = 0; field < 3; ++field) {
+                MetadataCheck profile = {.name = profile_names[field]};
+                solver_diagnostics(&solvers[team], find_metadata, &profile);
+                assert(profile.found && profile.value.type == METADATA_SIZE);
+                assert(profile.value.value.size == expected_profile[field]);
+            }
+#endif
             solver_destroy(&solvers[team]);
         }
     }
     simulation_destroy(state);
+    omp_set_max_active_levels(saved_levels);
     omp_set_num_threads(saved_threads);
     omp_set_dynamic(saved_dynamic);
 }
@@ -733,6 +989,7 @@ void test_solver(void)
     test_preparation_errors();
     test_configuration_contract();
     test_registered_solver_contract();
+    test_n2_first_row_initialization();
     test_barnes_hut_topology_reuse();
     test_barnes_hut_nonfinite_reuse();
     test_fmm_cutoff_settings();
@@ -743,6 +1000,9 @@ void test_solver(void)
     test_gravity_accuracy();
     test_barnes_hut_monopole_acceleration();
 #ifdef _OPENMP
+    test_fmm_thread_consistency();
+    test_fmm_parallel_fallback();
+    test_n2_thread_consistency();
     test_trajectory_thread_consistency();
     test_barnes_hut_thread_consistency();
 #endif

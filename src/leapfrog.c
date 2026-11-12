@@ -1,4 +1,7 @@
 #include "state_internal.h"
+#ifdef NBODY_BENCH_STEPS
+#include "step_timing.h"
+#endif
 
 static void kick_drift(size_t count, double dt, double half_dt,
                           double *restrict x, double *restrict y, double *restrict z,
@@ -65,6 +68,9 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
     const double half_dt = 0.5 * dt;
     /* Mutable public views make accelerations from any earlier call untrusted. */
     refresh_acceleration(simulation, solver, context);
+#ifdef NBODY_BENCH_STEPS
+    benchmark_step_boundary(0);
+#endif
     for (size_t step = 0; step < steps; ++step) {
         kick_drift(count, dt, half_dt, simulation->x, simulation->y, simulation->z,
                    simulation->vx, simulation->vy, simulation->vz,
@@ -72,5 +78,8 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
         refresh_acceleration(simulation, solver, context);
         finish_kick(count, half_dt, simulation->vx, simulation->vy, simulation->vz,
                     simulation->ax, simulation->ay, simulation->az);
+#ifdef NBODY_BENCH_STEPS
+        benchmark_step_boundary(step + 1);
+#endif
     }
 }

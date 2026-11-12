@@ -6,5 +6,5 @@ flowchart TD
     INPUT["Benchmark inputs<br/>generate_instance.py → bench/data/<br/>Seeded instances + curated data"] --> RUN
     RUN -->|launches archived build/bench| DRIVER["bench/driver.c<br/>reset, warm up and time simulation<br/>Only simulate_with_solver is timed"]
     DRIVER -->|runner collects and summarizes| RESULTS["results/<br/>persistent experiment records<br/>Binary, inputs, samples, summaries and logs"]
-    RESULTS -->|reads saved runs| PLOT["plot_results.py → plots/<br/>runtime and speedup figures<br/>Saved timings normalized by step count"]
+    RESULTS -->|reads saved runs| PLOT["figures/plot.py → figures/<br/>phase shares, runtime, speedup, comparisons<br/>Shared paper style · 600-dpi PNG"]
     click CORE "architecture.svg" "Open the simulator module diagram"
