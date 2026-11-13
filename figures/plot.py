@@ -433,6 +433,61 @@ def draw_parallel_sweep(plt, data):
     return draw_solver_sweep(plt, data, parallel=True)
 
 
+def draw_parallel_sweep_normalized(plt, data):
+    """Divide runtime and SD by each solver's asymptotic growth factor.
+
+    Separate linear y axes expose departures from constant normalized cost;
+    these factors are not operation counts or predictions of absolute runtime.
+    """
+    status, rows = data
+    legacy = status.get("error_bars") == "individual_step_sample_sd"
+    error_field = "step_sd_ms" if legacy else "stddev_ms_per_step"
+    factors = {"n2": lambda n: n ** 2,
+               "barnes-hut": lambda n: n * math.log2(n),
+               "fmm": lambda n: n}
+    formulas = {"n2": r"T/n^2", "barnes-hut": r"T/(n\log_2 n)", "fmm": r"T/n"}
+    solvers = [(solver, label, color) for solver, label, color in SWEEP_SOLVERS
+               if any(row["solver"] == solver for row in rows)]
+    fig, axes = plt.subplots(len(solvers), 1, sharex=True, squeeze=False,
+                             figsize=(5.5, 2 * len(solvers) + 0.5))
+    fig.suptitle("Runtime normalized by expected scaling", fontsize=11, y=0.985)
+    fig.text(0.55, 0.95, "Flat curves indicate runtime growing at the expected rate.",
+             ha="center", fontsize=8)
+    for ax, (solver, label, color) in zip(axes[:, 0], solvers):
+        for threads, line, marker in ((1, "-", "o"), (4, "--", "s"), (8, ":", "^")):
+            points = sorted((row for row in rows if row["solver"] == solver and row["threads"] == threads),
+                            key=lambda row: row["bodies"])
+            # n log(n) is zero at n=1, so that point has no normalized value.
+            points = [row for row in points if factors[solver](row["bodies"]) > 0]
+            if not points:
+                continue
+            scales = [1e6 / factors[solver](row["bodies"]) for row in points]  # ms -> ns
+            ax.errorbar([row["bodies"] for row in points],
+                        [row["mean_ms_per_step"] * scale for row, scale in zip(points, scales)],
+                        yerr=[row[error_field] * scale for row, scale in zip(points, scales)],
+                        label="{}T".format(threads), color=color, linestyle=line, marker=marker,
+                        markersize=3.5, linewidth=1, capsize=3, elinewidth=0.8)
+        ax.set_title(label, loc="left", fontsize=10)
+        ax.set_ylabel("Normalized runtime\n${}$ (ns / step)".format(formulas[solver]), fontsize=9)
+        ax.set_xscale("log")
+        ax.set_ylim(bottom=0)
+        ax.grid(which="major", color="0.9", linewidth=0.4)
+        ax.set_axisbelow(True)
+        ax.legend(frameon=False, ncol=3, loc="lower right", bbox_to_anchor=(1, 1),
+                  borderaxespad=0, columnspacing=1.2, handletextpad=0.5, fontsize=8)
+    counts = sorted(status["settings"]["bodies"])
+    axes[-1, 0].set_xticks(counts)
+    axes[-1, 0].set_xticklabels(["{:g}k".format(count / 1000) if count >= 1000 else str(count)
+                                for count in counts])
+    axes[-1, 0].set_xlabel("Number of bodies, $n$")
+    caption = ("One {}-step run; bars: normalized step-to-step SD".format(status["settings"]["steps"])
+               if legacy else "{} runs × {} steps; bars: normalized between-run SD".format(
+                   status["settings"]["samples"], status["settings"]["steps"]))
+    fig.text(0.55, 0.025, caption, ha="center", fontsize=8)
+    fig.subplots_adjust(left=0.18, right=0.97, top=0.89, bottom=0.13, hspace=0.45)
+    return fig
+
+
 def draw_solver_sweep(plt, data, parallel=False):
     status, rows = data
     legacy = status.get("error_bars") == "individual_step_sample_sd"
@@ -737,7 +792,9 @@ def prepare_figures(paths, baseline=None):
         elif kind == "solver-sweep.csv":
             jobs.append(("solver-sweep", draw_solver_sweep, load_solver_sweep(directory)))
         elif kind == "parallel-sweep.csv":
-            jobs.append(("parallel-sweep", draw_parallel_sweep, load_parallel_sweep(directory)))
+            data = load_parallel_sweep(directory)
+            jobs.append(("parallel-sweep", draw_parallel_sweep, data))
+            jobs.append(("parallel-sweep-normalized", draw_parallel_sweep_normalized, data))
         elif kind == "comparison.csv":
             jobs.append(("performance", draw_comparison, load_comparison(directory)))
         elif kind in ("timing-summary.csv", "timing-parent"):
