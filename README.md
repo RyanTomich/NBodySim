@@ -128,6 +128,7 @@ choose another location. Start with these saved files:
 | `<input>/timing/samples.csv` | Raw whole-run durations in seconds |
 | `<input>/timing/status.json` | Success/failure and run settings |
 | `<input>/timing/final.txt` | Final state from the timed run |
+| `<input>/timing/distribution-error.csv` | Six final-state position/acceleration CDF distances with `--compare-n2` |
 | `<input>/timing/error.csv` | Position, velocity, and acceleration differences with `--compare-n2` |
 
 Here `<input>` is a numbered folder such as `0001-1000`. Each run also saves the
@@ -302,7 +303,7 @@ The default sweep compares **Direct (`n2`), Barnes–Hut (theta 0.5), and FMM
 (order 4)** at **1,000, 5,000, 10,000, 20,000, and 50,000 bodies**, with `dt=0.0001`.
 Defaults are `--samples 3 --steps 20`, with no warmups. Override `--bodies`,
 `--samples` (at least two), `--steps` (at least two), `--dt`, `--theta`, `--order`,
-`--seed`, or `--results-dir` as needed. For a quick workflow check use
+`--seed`, `--distribution`, or `--results-dir` as needed. For a quick workflow check use
 `--bodies 16 32 --steps 3`. The runner cleans and builds a dedicated serial
 `build/bench_steps` executable; it inherits the compiler and LTO settings.
 Run it sequentially with other benchmarks because they share `build/`.
@@ -313,6 +314,12 @@ seed 42 by default). All three solvers use that same file, timestep, and step
 count. The timed direct trajectory is also the accuracy reference, so no extra
 direct run is needed. Errors are final-trajectory position, velocity, and
 acceleration differences, not force errors at identical positions.
+
+Use `--distribution clusters` for eight Gaussian clusters centered at the cube
+corners `(±1, ±1, ±1)`, with standard deviation `0.25` per coordinate and zero
+initial velocities. Masses and the other experiment settings stay the same.
+The saved generator settings record the distribution. This option also works
+with `--parallel`.
 
 The plot contains three lines. Each full-run duration is divided by its step
 count and converted to milliseconds: `ms_per_step = seconds * 1000 / steps`.
@@ -344,7 +351,6 @@ sweeps remain readable and retain their explicitly labeled step-to-step SD bars.
 python3 bench/accuracy_tradeoff.py
 # Use four threads for the untimed direct reference (requires OpenMP support):
 python3 bench/accuracy_tradeoff.py --reference-threads 4
-python3 figures/plot.py results/accuracy-tradeoff/<run>/accuracy-tradeoff.csv
 # Small end-to-end check of the same parameter sweep:
 python3 bench/accuracy_tradeoff.py --bodies 128 --steps 2
 ```
@@ -356,7 +362,9 @@ against one shared, untimed direct (`n2`) reference. Every approximate configura
 runs and one warmup**, with **dt=0.0001 and 500 steps** for trajectories
 (total simulated duration **0.05**).
 Override `--bodies`, `--dt`, `--steps`, `--samples`, `--warmups`, `--seed`,
-`--thetas`, or `--results-dir` as needed. The measured executable is built with
+`--thetas`, `--distribution`, or `--results-dir` as needed. Use
+`--distribution clusters` for the same eight clusters starting from rest described
+above. The measured executable is built with
 `OPENMP=0` and checked to be serial and uninstrumented. The direct reference runs
 once, with no warmup or timing samples. It defaults to one thread; use
 `--reference-threads N` to build a separate OpenMP reference executable and use
@@ -370,10 +378,23 @@ force evaluation (`steps + 1` calls). It resets the saved state before every run
 and retains ordinary prepared-solver reuse. Preparation, allocation, state resets,
 validation, and output remain untimed.
 
-The only accuracy metric is global relative L2 **final-position error**,
-`||x_final - x_n2_final||₂ / ||x_n2_final||₂`. This describes the last measured
-run and includes accumulated trajectory differences. Normalization uses absolute
-reference positions, as in the existing trajectory comparison.
+Accuracy is measured from the two saved final states using the maximum absolute
+empirical CDF difference for each of `x`, `y`, `z`, `ax`, `ay`, and `az`.
+Each particle has equal weight, and particle ordering is ignored. Distances range
+from zero (identical empirical distributions) to one. `position_ks_max` and
+`acceleration_ks_max` are the maximum distances across their respective three
+components. The comparison takes O(N log N) time outside the measured simulation.
+It requires equal, nonzero body counts and finite states. No initial state,
+intermediate trajectory, or force recomputation is used by this calculation.
+
+These are marginal distribution distances, not a statistical equivalence test.
+Matching marginals does not establish agreement of joint distributions or
+correlations. Acceleration differences include both different final positions
+and different force approximations. No p-values or acceptance thresholds are
+assigned. The runner uses the same timestep for the direct reference; to study
+integration accuracy, separately produce a finer-step reference at the same
+final time. State files contain no time metadata, so the caller must ensure
+that the two states represent the intended comparison time.
 
 Results live under `results/accuracy-tradeoff/<run>/`: shared `input.txt`, binary,
 build/generation logs, overall status, and `accuracy-tradeoff.csv` (approximate
@@ -381,24 +402,35 @@ solvers only). The `reference/` folder contains the single direct final state,
 status including its thread count, and logs; parallel runs also retain
 `reference-bench` and `reference-build.stdout.log`. Each approximate solver
 configuration has a `timing/` folder containing raw `samples.csv`, `summary.csv`,
-`final.txt`, position-only `error.csv`, `status.json`, and logs. Raw times are
-seconds per complete measured call; summaries are seconds/step. Failed experiments
-retain their status and error details.
+`final.txt`, six-row `distribution-error.csv` (`field,component,ks_distance`),
+legacy position-only `error.csv`, `status.json`, and logs. The aggregate CSV
+includes both maximum CDF distances. Raw times are seconds per complete measured
+call; summaries are seconds/step. Failed experiments retain their error details.
+Ordinary `--compare-n2` runs and solver sweeps also save `distribution-error.csv`;
+the maxima appear in comparison status and sweep summaries, respectively.
 
-The plotter validates all configurations and raw timings and writes one 600-dpi
-figure: **`accuracy-trajectory.png`**, showing final-position error versus ms/step
-on logarithmic axes. Points show means, with ± one sample SD across runs, and
-parameter labels. Circled points and a dashed line highlight the combined
-approximate-solver Pareto frontier: no measured point is both no slower and no
-less accurate, with at least one strict improvement. Connecting lines guide the
-eye; they do not establish performance at unmeasured parameter values. The
-zero-error direct reference is omitted; zero or undefined approximate errors are
-reported and omitted without an artificial error floor. Three samples are a
-compact comparison, not a precise performance ranking; SD bars are not confidence
-intervals. Older saved runs remain readable using only their trajectory data.
-To exclude theta values below 0.2 from an older sweep without changing its saved
-data, add `--accuracy-min-theta 0.2` to the plotting command. The Pareto frontier
-is recomputed using only the displayed points.
+Accuracy sweeps retain CSV summaries for analysis. Use the six-panel final-state
+comparison below to visualize distributions; no accuracy–runtime figures are generated.
+
+To overlay all six empirical distributions from any two saved final states,
+without rerunning a simulation:
+
+```sh
+python3 figures/plot.py --compare-states \
+  results/accuracy-tradeoff/<run>/barnes-hut-theta-0.5/timing/final.txt \
+  results/accuracy-tradeoff/<run>/reference/final.txt \
+  --state-labels "Barnes–Hut" "Direct reference"
+```
+
+This writes **`figures/distribution-comparison.png`** at 600 dpi. The top row
+compares position components and the bottom row compares acceleration components.
+Each panel overlays both ECDFs and reports its distance D; the six distances and
+two maxima are also printed. This command needs only the two state files and
+works with historical results. Existing result files are not modified.
+Add `--cdf-central-fraction 0.98` to write `distribution-comparison-zoom.png`,
+zooming each x axis to the combined central 98% ranges of the two samples.
+Only the visible range changes; ECDF normalization and distances still use every
+particle, and the figure labels the zoom. The default shows the full range.
 
 ## Parallel scaling sweep
 
@@ -441,6 +473,11 @@ Cases use `<N>/<solver>-<threads>threads/` and retain raw whole-run and step
 timings, final states, trajectory errors, logs, and requested/effective thread
 metadata. The plotter accepts the CSV or run directory and validates every case
 and its raw durations before writing `figures/parallel-sweep.png` at 600 dpi.
+The same command also writes `figures/parallel-sweep.csv`, with one row per
+plotted point: body count, solver, threads, mean runtime and sample SD in ms/step,
+plus steps, timestep, sample count, theta, and FMM order. Historical single-run
+data exports its plotted step-to-step SD as `step_sd_ms`; newer runs use
+`stddev_ms_per_step` for between-run SD.
 
 ## Paper figures
 
@@ -477,7 +514,7 @@ and a temporary font cache. No TeX installation is required.
 | Current-suite `comparison.csv` or its run folder | `performance`: solver runtime with sample SD |
 | `solver-sweep.csv` or its run folder | `solver-sweep`: three serial solver lines with between-run sample SD |
 | `parallel-sweep.csv` or its run folder | `parallel-sweep`: Direct/Barnes–Hut/FMM at 1/4/8 threads; Direct only 8T above 50k |
-| `accuracy-tradeoff.csv` or its run folder | `accuracy-trajectory`: serial final-position error–runtime curve and Pareto frontier |
+| `--compare-states ACTUAL REFERENCE` | `distribution-comparison`: six final-state ECDF overlays |
 | `timing-summary.csv` or its run folder | `runtime` and `speedup` |
 | Parent folder containing ordinary timing runs | `runtime` and `speedup`, comparing runs |
 
@@ -502,11 +539,13 @@ raw timing samples, including explicitly skipped configurations.
 The script validates every supplied dataset before drawing. Duplicate datasets
 and conflicting output names are rejected. Supply one dataset per figure type
 and one input group for ordinary runtime/speedup plots per invocation. Each
-invocation replaces the corresponding fixed-name figures. Generated PNG files are ignored by Git; the script is tracked.
+invocation replaces the corresponding fixed-name figures and parallel-sweep CSV.
+Generated PNG files and the exported CSV are ignored by Git; the script is tracked.
 
 To add a figure, add its data loader and drawing function to `figures/plot.py`,
 then register its input format in `prepare_figures`. Drawing functions return a
-Matplotlib figure and use the shared `STYLE`; only `save_figure` writes outputs.
+Matplotlib figure and use the shared `STYLE`; `save_figure` writes PNGs and
+`save_parallel_sweep_table` writes the parallel-sweep CSV.
 Add data-validation coverage in `tests/test_figures.py`, update the input table
 above, and inspect the generated PNG at paper size. Do not create separate
 plotting scripts in benchmark or result directories.
@@ -618,6 +657,31 @@ coordinates in `[-10, 10]`, masses in `[1, 100]`, velocity magnitudes up to `3`,
 and acceleration magnitudes up to `2`. Reusing the arguments and seed reproduces
 the input. Use `--output PATH` to choose a destination; existing output files are
 overwritten. Generated files work directly with both the app and benchmark runner.
+
+To generate eight clusters starting from rest:
+
+```sh
+python3 generate_instance.py --distribution clusters --n 1000 \
+  --w-min 1 --w-max 100 --v-max 0 --a-max 0 --seed 42
+```
+
+This writes `bench/data/instance-clusters-n1000-seed42.txt`. Body `i` is assigned
+to corner `i % 8` of `(±1, ±1, ±1)`, with independent Gaussian noise of standard
+deviation `0.25` added to each coordinate. For 1,000 bodies, each cluster has
+125 members. Cluster positions are not clipped; `--L` is ignored for this mode
+and remains required for the default `--distribution uniform`. Mass and vector
+options work with either distribution. Reusing the same seed and arguments
+reproduces the instance.
+
+To view the full clustered setup and a zoom of one cluster:
+
+```sh
+python3 figures/plot.py --cluster-state bench/data/instance-clusters-n1000-seed42.txt
+```
+
+This writes `figures/cluster-setup.png`. The zoom shows x–y offsets from the
+first cluster's center. Use an initial clustered input, whose rows cycle through
+the eight clusters in generator order.
 
 The instance format is a body count followed by one row per body:
 

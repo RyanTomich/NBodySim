@@ -27,6 +27,25 @@ class SolverSweepTests(unittest.TestCase):
         self.assertEqual(args.steps, 20)
         self.assertEqual(args.samples, 3)
         self.assertEqual((args.theta, args.order), (0.5, 4))
+        self.assertEqual(args.distribution, "uniform")
+
+    def test_cluster_sweep_saves_distribution_and_rest_state(self):
+        with TemporaryDirectory() as temporary:
+            args = sweep.parse_args(["--distribution", "clusters", "--bodies", "64",
+                                     "--steps", "2", "--samples", "2", "--dt", "0.000001",
+                                     "--results-dir", temporary])
+            with patch.object(sweep, "build", return_value=ROOT / "build/bench_steps"), patch("builtins.print"):
+                self.assertEqual(sweep.experiment(args), 0)
+            directory = next(Path(temporary).iterdir())
+            status = json.loads((directory / "status.json").read_text())
+            self.assertEqual(status["status"], "ok")
+            self.assertEqual(status["settings"]["generator"],
+                             {"distribution": "clusters", "L": None, "w_min": 1,
+                              "w_max": 100, "v_max": 0, "a_max": 0})
+            initial = runner.read_state(directory / "64/input.txt")
+            self.assertTrue(all(row[4:] == [0] * 6 for row in initial))
+            self.assertTrue(all(abs(abs(value) - 1) < 2 for row in initial for value in row[1:4]))
+            self.assertEqual(len(load_solver_sweep(directory)[1]), 3)
 
     def test_parallel_defaults_and_overrides(self):
         args = sweep.parse_args(["--parallel"])

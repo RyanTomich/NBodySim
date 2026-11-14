@@ -86,10 +86,13 @@ def read_samples(path, samples):
 
 def experiment(args):
     directory = runner.create_experiment_directory(args.results_dir)
+    max_speed = 0 if args.distribution == "clusters" else 3
     settings = {key: getattr(args, key) for key in
                 ("bodies", "dt", "steps", "samples", "warmups", "seed", "thetas", "reference_threads")}
     settings.update(threads=1, openmp=False, orders=list(range(1, 7)),
-                    generator={"L": 10, "w_min": 1, "w_max": 100, "v_max": 3, "a_max": 0})
+                    generator={"distribution": args.distribution,
+                               "L": 10 if args.distribution == "uniform" else None,
+                               "w_min": 1, "w_max": 100, "v_max": max_speed, "a_max": 0})
     status = {"status": "running", "suite": "accuracy-tradeoff", "settings": settings,
               "started": runner.now()}
     runner.write_json(directory / "status.json", status)
@@ -99,7 +102,8 @@ def experiment(args):
         reference_binary = build(directory, openmp=True) if args.reference_threads > 1 else binary
         instance = directory / "input.txt"
         command = [sys.executable, runner.ROOT / "generate_instance.py", "--n", str(args.bodies),
-                   "--L", "10", "--w-min", "1", "--w-max", "100", "--v-max", "3",
+                   "--distribution", args.distribution, "--L", "10",
+                   "--w-min", "1", "--w-max", "100", "--v-max", str(max_speed),
                    "--a-max", "0", "--seed", str(args.seed), "--output", instance]
         if runner.run_logged(command, directory, stdout="generation.stdout.log",
                              stderr="generation.stderr.log"):
@@ -120,6 +124,7 @@ def experiment(args):
             read_samples(case / "timing/samples.csv", args.samples)
             final = runner.read_state(case / "timing/final.txt")
             runner.validate_bodies(final, initial)
+            distribution = runner.save_distribution_errors(case / "timing", final, trajectory_reference)
             position_error = runner.trajectory_errors(final, trajectory_reference)[0]
             runner.write_csv(case / "timing/error.csv", list(position_error), [position_error])
             row = {"case": name, "bodies": args.bodies, "solver": solver, "theta": theta,
@@ -127,11 +132,12 @@ def experiment(args):
                    "samples": args.samples, "warmups": args.warmups,
                    "mean_seconds_per_step": timing_summary["mean_seconds_per_step"],
                    "stddev_seconds_per_step": timing_summary["stddev_seconds_per_step"],
-                   "position_relative_l2": position_error["relative_l2_error"]}
+                   "position_relative_l2": position_error["relative_l2_error"], **distribution}
             rows.append(row)
             runner.write_csv(directory / "accuracy-tradeoff.csv", list(row), rows)
-            print("  trajectory {:.4g} ms/step; position error {}".format(
-                1000 * row["mean_seconds_per_step"], row["position_relative_l2"]), flush=True)
+            print("  trajectory {:.4g} ms/step; position D={:.4g}; acceleration D={:.4g}".format(
+                1000 * row["mean_seconds_per_step"], row["position_ks_max"],
+                row["acceleration_ks_max"]), flush=True)
         status["status"] = "ok"
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError, KeyboardInterrupt) as error:
         status.update(status="failed", error=str(error) or "Interrupted by user")
@@ -150,6 +156,8 @@ def parse_args(argv=None):
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--distribution", choices=("uniform", "clusters"), default="uniform",
+                        help="initial positions; clusters start from rest")
     parser.add_argument("--reference-threads", type=int, default=1,
                         help="threads for the single untimed n2 reference; >1 requires an OpenMP-capable compiler")
     parser.add_argument("--thetas", nargs="+", type=float, default=[0.2, 0.3, 0.5, 0.7])

@@ -3,9 +3,13 @@
 
 Usage: python3 figures/plot.py DATA [DATA ...] [--baseline RUN]
 DATA may be a phase-summary.csv, comparison.csv, solver-sweep.csv, parallel-sweep.csv,
-accuracy-tradeoff.csv, timing-summary.csv, its run
+timing-summary.csv, its run
 folder, or a parent containing ordinary timing runs. Outputs are fixed-name 600-dpi PNGs
-saved beside this script; each run replaces the previous figure of that type. Requires Python 3.8+ and Matplotlib; no TeX installation needed.
+saved beside this script; each run replaces the previous figure of that type.
+Parallel sweeps also export the plotted data to parallel-sweep.csv.
+Use --compare-states ACTUAL REFERENCE to compare two saved final states.
+Use --cluster-state INPUT for an overview and zoom of a generated clustered input.
+Requires Python 3.8+ and Matplotlib; no TeX installation needed.
 """
 
 import argparse
@@ -23,6 +27,9 @@ from tempfile import TemporaryDirectory
 import textwrap
 
 OUTPUT = Path(__file__).resolve().parent
+sys.path.insert(0, str(OUTPUT.parent / "bench"))
+from run import (DISTRIBUTION_COMPONENTS, distribution_errors, distribution_summary,
+                 read_state)
 
 # Shared NeurIPS paper style: 5.5-inch text width and serif typography.
 # Titles and experimental captions belong in the paper.
@@ -167,159 +174,52 @@ SWEEP_SOLVERS = (("n2", "Direct", "#E69F00"),
                  ("fmm", "FMM", "#009E73"))
 
 
-def load_accuracy_tradeoff(directory):
-    status = json.loads((directory / "status.json").read_text())
-    if status.get("status") != "ok" or status.get("suite") != "accuracy-tradeoff":
-        raise ValueError("Expected a completed accuracy tradeoff run")
-    settings = status["settings"]
-    if (settings["bodies"] <= 0 or settings["steps"] <= 0 or settings["samples"] < 2
-            or settings["warmups"] < 0 or not math.isfinite(settings["dt"]) or settings["dt"] <= 0
-            or settings["threads"] != 1 or settings["openmp"] is not False
-            or settings["orders"] != list(range(1, 7)) or not settings["thetas"]
-            or len(set(settings["thetas"])) != len(settings["thetas"])
-            or any(not math.isfinite(theta) or theta < 0 for theta in settings["thetas"])):
-        raise ValueError("Invalid accuracy tradeoff settings")
-    # New runs save a single untimed direct reference outside the timing table.
-    # Keep historical runs with a timed n2 row readable without modifying them.
-    expected = {}
-    if "reference_threads" in settings:
-        threads = settings["reference_threads"]
-        reference = json.loads((directory / "reference/status.json").read_text())
-        if (type(threads) is not int or threads < 1
-                or any(reference.get(key) != value for key, value in {
-                    "status": "ok", "mode": "reference", "solver": "n2", "integrator": "leapfrog",
-                    "dt": settings["dt"], "steps": settings["steps"], "samples": 1, "warmups": 0,
-                    "threads": threads, "openmp": threads > 1}.items())
-                or not (directory / "reference/final.txt").is_file()):
-            raise ValueError("Invalid or incomplete direct reference")
-    else:
-        expected[("n2", None, None)] = "n2"
-    expected.update({("barnes-hut", theta, None): "barnes-hut-theta-" + str(theta)
-                     for theta in settings["thetas"]})
-    expected.update({("fmm", None, order): "fmm-order-" + str(order) for order in range(1, 7)})
-    with (directory / "accuracy-tradeoff.csv").open(newline="") as source:
-        rows = list(csv.DictReader(source))
-    seen = set()
-    for row in rows:
-        theta = float(row["theta"]) if row["theta"] else None
-        order = int(row["order"]) if row["order"] else None
-        key = row["solver"], theta, order
-        if key not in expected or key in seen or row["case"] != expected[key]:
-            raise ValueError("Unexpected or duplicate accuracy configuration")
-        seen.add(key)
-        for field in ("bodies", "steps", "samples", "warmups", "threads"):
-            if int(row[field]) != settings[field]:
-                raise ValueError("Inconsistent accuracy workload: " + field)
-        if float(row["dt"]) != settings["dt"]:
-            raise ValueError("Inconsistent accuracy timestep")
-        folder = directory / row["case"] / "timing"
-        saved = json.loads((folder / "status.json").read_text())
-        if saved.get("status") != "ok" or saved.get("solver") != row["solver"]:
-            raise ValueError("Incomplete accuracy measurement")
-        if saved.get("theta") != theta or saved.get("order") != order:
-            raise ValueError("Inconsistent solver parameter")
-        if (saved.get("dt") != settings["dt"] or saved.get("steps") != settings["steps"]
-                or saved.get("integrator") != "leapfrog"):
-            raise ValueError("Inconsistent trajectory measurement")
-        with (folder / "samples.csv").open(newline="") as source:
-            samples = list(csv.DictReader(source))
-        if [int(sample["sample"]) for sample in samples] != list(range(1, settings["samples"] + 1)):
-            raise ValueError("Missing or duplicate accuracy samples")
-        durations = [float(sample["seconds"]) / settings["steps"] for sample in samples]
-        if any(not math.isfinite(value) or value <= 0 for value in durations):
-            raise ValueError("Invalid accuracy timing sample")
-        for prefix, value in (("mean", statistics.mean(durations)),
-                              ("stddev", statistics.stdev(durations))):
-            field = prefix + "_seconds_per_step"
-            if not math.isclose(float(row[field]), value, rel_tol=1e-12, abs_tol=1e-15):
-                raise ValueError("Accuracy summary does not match raw samples")
-            row[field] = value
-        with (folder / "error.csv").open(newline="") as source:
-            # Older runs also saved velocity and acceleration errors. Only
-            # position is needed; their other files and columns stay untouched.
-            errors = [error for error in csv.DictReader(source) if error["field"] == "position"]
-        if len(errors) != 1:
-            raise ValueError("Missing or duplicate position error metric")
-        error = errors[0]
-        value = float(error["relative_l2_error"]) if error["relative_l2_error"] else None
-        aggregate = float(row["position_relative_l2"]) if row["position_relative_l2"] else None
-        if (value != aggregate or (value is not None and (not math.isfinite(value) or value < 0))
-                or error["relative_status"] != ("undefined" if value is None else "ok")
-                or (row["solver"] == "n2" and value != 0)):
-            raise ValueError("Invalid position error metric")
-        row["position_relative_l2"] = value
-        row.update(theta=theta, order=order)
-    if seen != set(expected):
-        raise ValueError("Missing accuracy configurations")
-    return status, rows
+def load_distribution_comparison(actual_path, reference_path, labels):
+    actual, reference = read_state(actual_path), read_state(reference_path)
+    distances = distribution_errors(actual, reference)
+    return actual, reference, distances, labels
 
 
-def pareto_frontier(points):
-    """Indices of nondominated (error, runtime) points; exact ties both survive."""
-    return [i for i, (error, runtime) in enumerate(points)
-            if not any(other_error <= error and other_time <= runtime
-                       and (other_error < error or other_time < runtime)
-                       for other_error, other_time in points)]
-
-
-def draw_accuracy_trajectory(plt, data, min_theta=None):
-    status, rows = data
-    metric = "position_relative_l2"
-    mean, sd = "mean_seconds_per_step", "stddev_seconds_per_step"
-    points = []
-    for row in rows:
-        if row["solver"] == "n2":
-            continue
-        if row["solver"] == "barnes-hut" and min_theta is not None and row["theta"] < min_theta:
-            continue
-        if row[metric] is None or row[metric] <= 0:
-            print("Omitting {} from {}: zero or undefined error".format(row["case"], metric), file=sys.stderr)
-        else:
-            points.append(row)
-    if not points:
-        raise ValueError("No positive errors available for " + metric)
-    fig, ax = plt.subplots(figsize=(5.5, 3.5))
-    for solver, label, color in SWEEP_SOLVERS[1:]:
-        series = sorted((row for row in points if row["solver"] == solver),
-                        key=lambda row: row["theta"] if solver == "barnes-hut" else row["order"])
-        if not series:
-            continue
-        ax.errorbar([row[metric] for row in series], [1000 * row[mean] for row in series],
-                    yerr=[1000 * row[sd] for row in series], color=color, label=label,
-                    marker="s" if solver == "barnes-hut" else "^", markersize=4,
-                    linewidth=1, capsize=3, elinewidth=0.8)
-        for row in series:
-            label = r"$\theta={:g}$".format(row["theta"]) if solver == "barnes-hut" else "$p={}$".format(row["order"])
-            # Separate labels where the two curves cluster at low runtimes.
-            crossing = solver == "barnes-hut" and row["theta"] == 0.3
-            order_four = solver == "fmm" and row["order"] == 4
-            theta_five = solver == "barnes-hut" and row["theta"] == 0.5
-            lower_theta = solver == "barnes-hut" and row["theta"] == 0.7
-            ax.annotate(label, (row[metric], 1000 * row[mean]),
-                        xytext=(0, -16) if crossing else ((0, -28) if order_four else ((0, 10) if theta_five else ((8, -8) if lower_theta else (5, 6)))),
-                        ha="center" if crossing or order_four or theta_five else "left",
-                        va="top" if crossing or order_four or lower_theta else "bottom",
-                        arrowprops={"arrowstyle": "-", "color": "0.5", "linewidth": 0.5} if crossing or order_four else None,
-                        textcoords="offset points", fontsize=7)
-    frontier = [points[i] for i in pareto_frontier([(row[metric], row[mean]) for row in points])]
-    frontier.sort(key=lambda row: row[metric])
-    ax.plot([row[metric] for row in frontier], [1000 * row[mean] for row in frontier],
-            color="0.25", linestyle="--", linewidth=0.8, marker="o", markersize=8,
-            markerfacecolor="none", markeredgewidth=0.8, label="Pareto frontier", zorder=4)
-    ax.set_xscale("log")
-    ax.set_yscale("log", nonpositive="clip")
-    ax.set_xlabel("Relative L2 final-position error")
-    ax.set_ylabel("Simulation runtime (ms / step)")
-    ax.margins(x=0.18, y=0.2)
-    ax.grid(which="major", color="0.9", linewidth=0.4)
-    ax.set_axisbelow(True)
-    ax.legend(frameon=False, fontsize=8)
-    settings = status["settings"]
-    caption = "N={:,}; serial; {} runs; bars: between-run SD".format(settings["bodies"], settings["samples"])
-    fig.text(0.55, 0.025, caption, ha="center", fontsize=8)
-    fig.subplots_adjust(left=0.15, right=0.97, top=0.97, bottom=0.22)
-    if any(row[sd] >= row[mean] for row in points):
-        print("Note: nonpositive lower SD endpoints extend below the log axis.", file=sys.stderr)
+def draw_distribution_comparison(plt, data, central_fraction=1.0):
+    """Six unweighted ECDF overlays; only the supplied final states are used."""
+    if not 0 < central_fraction <= 1:
+        raise ValueError("CDF central fraction must be in (0, 1]")
+    actual, reference, distances, labels = data
+    fig, axes = plt.subplots(2, 3, figsize=(5.5, 4.2), sharey=True)
+    for ax, (field, component, column), error in zip(axes.flat, DISTRIBUTION_COMPONENTS, distances):
+        lower = min(min(row[column] for row in state) for state in (actual, reference))
+        upper = max(max(row[column] for row in state) for state in (actual, reference))
+        central_bounds = []
+        for state, label, color, style in ((reference, labels[1], "#E69F00", "-"),
+                                          (actual, labels[0], "#0072B2", "--")):
+            values = sorted(row[column] for row in state)
+            tail = int((1 - central_fraction) * len(values) / 2)
+            central_bounds.append((values[tail], values[-tail - 1]))
+            # Show both CDFs over the same domain, including their zero/one tails.
+            ax.step([lower] + values + [upper],
+                    [0] + [(i + 1) / len(values) for i in range(len(values))] + [1],
+                    where="post", label=label, color=color, linestyle=style, linewidth=1)
+        if central_fraction < 1:
+            left, right = min(pair[0] for pair in central_bounds), max(pair[1] for pair in central_bounds)
+            if left < right:
+                ax.set_xlim(left, right)
+        ax.set_xlabel(("Position " if field == "position" else "Acceleration ") + component)
+        ax.text(0.04, 0.92, "D = {:.4g}".format(error["ks_distance"]),
+                transform=ax.transAxes, fontsize=8, va="top")
+        ax.set_ylim(-0.02, 1.05)
+        ax.ticklabel_format(axis="x", style="sci", scilimits=(-3, 3), useOffset=False)
+        ax.locator_params(axis="x", nbins=3)
+        ax.grid(color="0.9", linewidth=0.4)
+        ax.set_axisbelow(True)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("Empirical CDF")
+    zoomed = central_fraction < 1
+    fig.legend(*axes[0, 0].get_legend_handles_labels(), loc="lower center",
+               bbox_to_anchor=(0.5, 0.045 if zoomed else 0), ncol=2, frameon=False)
+    if zoomed:
+        fig.text(0.5, 0.015, "Axes: central {:g}%; CDFs and D use all particles".format(100 * central_fraction),
+                 ha="center", fontsize=8)
+    fig.tight_layout(rect=(0, 0.14 if zoomed else 0.09, 1, 1), pad=0.7)
     return fig
 
 
@@ -787,8 +687,7 @@ def prepare_figures(paths, baseline=None):
             jobs.append(("phase-shares", draw_phase_shares,
                          read_shares(directory / kind)))
         elif kind == "accuracy-tradeoff.csv":
-            data = load_accuracy_tradeoff(directory)
-            jobs.append(("accuracy-trajectory", draw_accuracy_trajectory, data))
+            raise ValueError("Accuracy tradeoff plots have been removed; use --compare-states ACTUAL REFERENCE")
         elif kind == "solver-sweep.csv":
             jobs.append(("solver-sweep", draw_solver_sweep, load_solver_sweep(directory)))
         elif kind == "parallel-sweep.csv":
@@ -814,6 +713,44 @@ def prepare_figures(paths, baseline=None):
     return jobs
 
 
+def draw_cluster_state(plt, rows):
+    """Show the generator's eight interleaved clusters at global and local scales."""
+    if not rows:
+        raise ValueError("Cluster view requires a nonempty state")
+    fig = plt.figure(figsize=(7.5, 3.5))
+    overview = fig.add_subplot(121, projection="3d")
+    zoom = fig.add_subplot(122)
+    colors = ("#0072B2", "#D55E00", "#009E73", "#CC79A7",
+              "#E69F00", "#56B4E9", "#6F4E7C", "#444444")
+    for cluster, color in enumerate(colors):
+        points = rows[cluster::8]
+        if points:
+            overview.scatter(*zip(*(row[1:4] for row in points)), s=4,
+                             color=color, alpha=0.65, depthshade=False, linewidths=0)
+    limit = max(1.15, max(abs(value) for row in rows for value in row[1:4]) * 1.05)
+    for axis in ("x", "y", "z"):
+        getattr(overview, "set_" + axis + "lim")(-limit, limit)
+        getattr(overview, "set_" + axis + "ticks")([-1, 0, 1])
+        getattr(overview, "set_" + axis + "label")(axis, labelpad=-1)
+    overview.set_box_aspect((1, 1, 1))
+    overview.view_init(elev=20, azim=32)
+    overview.set_title("All eight clusters", fontsize=11, pad=8)
+
+    # Cluster zero is centered at (-1, -1, -1); show offsets in its x-y plane.
+    points = rows[::8]
+    offsets = [(row[1] + 1, row[2] + 1) for row in points]
+    zoom.scatter(*zip(*offsets), s=14, color=colors[0], alpha=0.75, linewidths=0)
+    zoom.axhline(0, color="0.75", linewidth=0.6, zorder=0)
+    zoom.axvline(0, color="0.75", linewidth=0.6, zorder=0)
+    limit = max(0.085, max(abs(value) for point in offsets for value in point) * 1.1)
+    zoom.set(xlim=(-limit, limit), ylim=(-limit, limit), aspect="equal",
+             xlabel="x offset from cluster center", ylabel="y offset from cluster center",
+             xticks=[-0.05, 0, 0.05], yticks=[-0.05, 0, 0.05])
+    zoom.set_title("One cluster: {} bodies (x–y view)".format(len(points)), fontsize=11, pad=8)
+    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.20, top=0.87, wspace=0.27)
+    return fig
+
+
 def draw_speedup(plt, data):
     return draw_timing(plt, data, speedup=True)
 
@@ -825,17 +762,54 @@ def save_figure(fig, name):
     print("Saved " + str(path))
 
 
+def save_parallel_sweep_table(data):
+    """Export plotted means and error bars, retaining their units and settings."""
+    status, rows = data
+    error_field = ("step_sd_ms" if status.get("error_bars") == "individual_step_sample_sd"
+                   else "stddev_ms_per_step")
+    fields = ["bodies", "solver", "threads", "mean_ms_per_step", error_field,
+              "steps", "dt", "samples", "theta", "order"]
+    solver_order = {solver: index for index, (solver, _, _) in enumerate(SWEEP_SOLVERS)}
+    points = sorted(rows, key=lambda row: (row["bodies"], solver_order[row["solver"]], row["threads"]))
+    path = OUTPUT / "parallel-sweep.csv"
+    with path.open("w", newline="") as output:
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(points)
+    print("Saved " + str(path))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("data", nargs="+", type=Path, help="summary CSVs, run folders, or timing-run parent folders")
+    parser.add_argument("data", nargs="*", type=Path, help="summary CSVs, run folders, or timing-run parent folders")
     parser.add_argument("--baseline", help="baseline run name/label for ordinary timing and speedup figures")
-    parser.add_argument("--accuracy-min-theta", type=float,
-                        help="omit smaller Barnes–Hut theta values from accuracy figures without changing saved data")
+    parser.add_argument("--cluster-state", type=Path,
+                        help="plot initial positions from generate_instance.py --distribution clusters")
+    parser.add_argument("--compare-states", nargs=2, type=Path, metavar=("ACTUAL", "REFERENCE"),
+                        help="plot six position/acceleration ECDFs from two final-state files")
+    parser.add_argument("--state-labels", nargs=2, default=("Simulation", "Reference"),
+                        metavar=("ACTUAL", "REFERENCE"), help="legend labels for --compare-states")
+    parser.add_argument("--cdf-central-fraction", type=float, default=1.0,
+                        help="display-only central fraction for ECDF x limits, e.g. 0.98 (default: all)")
     args = parser.parse_args(argv)
-    if args.accuracy_min_theta is not None and (not math.isfinite(args.accuracy_min_theta) or args.accuracy_min_theta < 0):
-        parser.error("accuracy minimum theta must be finite and nonnegative")
+    if not 0 < args.cdf_central_fraction <= 1:
+        parser.error("CDF central fraction must be in (0, 1]")
+    if args.cdf_central_fraction != 1 and not args.compare_states:
+        parser.error("--cdf-central-fraction requires --compare-states")
+    if not args.data and not args.compare_states and not args.cluster_state:
+        parser.error("supply benchmark data, --cluster-state INPUT, or --compare-states ACTUAL REFERENCE")
     try:
         jobs = prepare_figures(args.data, args.baseline)
+        if args.cluster_state:
+            jobs.append(("cluster-setup", draw_cluster_state, read_state(args.cluster_state)))
+        if args.compare_states:
+            comparison = load_distribution_comparison(*args.compare_states, args.state_labels)
+            name = "distribution-comparison" + ("-zoom" if args.cdf_central_fraction < 1 else "")
+            jobs.append((name, draw_distribution_comparison, comparison))
+            for row in comparison[2]:
+                print("{}: D={:.6g}".format(row["component"], row["ks_distance"]))
+            for field, value in distribution_summary(comparison[2]).items():
+                print("{}={:.6g}".format(field, value))
         # Keep imports lazy: data validation and repository tests need only the
         # standard library; drawing alone requires Matplotlib.
         with TemporaryDirectory(prefix="nbody-figures-") as cache:
@@ -846,10 +820,14 @@ def main(argv=None):
             import matplotlib.pyplot as plt
             with plt.rc_context(STYLE):
                 for name, draw, data in jobs:
-                    fig = (draw(plt, data, min_theta=args.accuracy_min_theta)
-                           if name == "accuracy-trajectory" else draw(plt, data))
+                    if draw == draw_distribution_comparison:
+                        fig = draw(plt, data, central_fraction=args.cdf_central_fraction)
+                    else:
+                        fig = draw(plt, data)
                     try:
                         save_figure(fig, name)
+                        if name == "parallel-sweep":
+                            save_parallel_sweep_table(data)
                     finally:
                         plt.close(fig)
     except (OSError, ValueError, KeyError, TypeError, ImportError) as error:

@@ -123,6 +123,51 @@ def trajectory_errors(actual, reference):
     return rows
 
 
+# Columns in the saved w x y z vx vy vz ax ay az state format.
+DISTRIBUTION_COMPONENTS = (("position", "x", 1), ("position", "y", 2),
+                           ("position", "z", 3), ("acceleration", "ax", 7),
+                           ("acceleration", "ay", 8), ("acceleration", "az", 9))
+
+
+def distribution_errors(actual, reference):
+    """Unweighted marginal CDF distances from two final states, ignoring body order."""
+    if not actual or len(actual) != len(reference):
+        raise ValueError("Distribution comparison requires equal nonzero body counts")
+    for state in (actual, reference):
+        if any(len(row) != 10 or any(not math.isfinite(value) for value in row)
+               or row[0] <= 0 for row in state):
+            raise ValueError("Distribution comparison requires finite states with positive masses")
+    rows = []
+    count = len(actual)
+    for field, component, column in DISTRIBUTION_COMPONENTS:
+        a = sorted(row[column] for row in actual)
+        b = sorted(row[column] for row in reference)
+        i = j = maximum = 0
+        while i < count or j < count:
+            value = min(a[i] if i < count else math.inf,
+                        b[j] if j < count else math.inf)
+            # Both right-continuous CDFs must consume all ties together.
+            while i < count and a[i] == value:
+                i += 1
+            while j < count and b[j] == value:
+                j += 1
+            maximum = max(maximum, abs(i - j))
+        rows.append({"field": field, "component": component,
+                     "ks_distance": maximum / count})
+    return rows
+
+
+def distribution_summary(rows):
+    return {field + "_ks_max": max(row["ks_distance"] for row in rows if row["field"] == field)
+            for field in ("position", "acceleration")}
+
+
+def save_distribution_errors(directory, actual, reference):
+    rows = distribution_errors(actual, reference)
+    write_csv(directory / "distribution-error.csv", list(rows[0]), rows)
+    return distribution_summary(rows)
+
+
 def compare_n2(binary, instance, folder, args):
     """Compare the timed final state with one unmeasured n2 reference run."""
     directory = folder / "reference"
@@ -149,7 +194,9 @@ def compare_n2(binary, instance, folder, args):
     try:
         if status["status"] != "ok":
             raise RuntimeError(status["error"])
-        rows = trajectory_errors(read_state(timing / "final.txt"), reference)
+        actual = read_state(timing / "final.txt")
+        comparison.update(save_distribution_errors(timing, actual, reference))
+        rows = trajectory_errors(actual, reference)
         write_csv(timing / "error.csv", list(rows[0]), rows)
         comparison["status"] = "ok"
     except (OSError, ValueError, RuntimeError) as error:

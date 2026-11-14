@@ -133,6 +133,7 @@ def collect(binary, instance, case, solver, args, threads=1):
 def experiment(args):
     directory = runner.create_experiment_directory(args.results_dir)
     suite = "parallel-sweep" if args.parallel else "solver-sweep"
+    max_speed = 0 if args.distribution == "clusters" else 3
     settings = {"bodies": args.bodies, "steps": args.steps, "dt": args.dt,
                 "theta": args.theta, "order": args.order,
                 "configurations": [{"bodies": count, "solver": solver, "threads": threads}
@@ -140,7 +141,9 @@ def experiment(args):
                                    for solver, threads in configurations(count, args.parallel)],
                 "threads": [1, 4, 8] if args.parallel else 1,
                 "samples": args.samples, "warmups": 0, "seed": args.seed,
-                "generator": {"L": 10, "w_min": 1, "w_max": 100, "v_max": 3, "a_max": 0}}
+                "generator": {"distribution": args.distribution,
+                              "L": 10 if args.distribution == "uniform" else None,
+                              "w_min": 1, "w_max": 100, "v_max": max_speed, "a_max": 0}}
     status = {"status": "running", "suite": suite, "settings": settings,
               "started": runner.now(), "error_bars": "whole_run_sample_sd"}
     runner.write_json(directory / "status.json", status)
@@ -152,7 +155,8 @@ def experiment(args):
             folder.mkdir()
             instance = folder / "input.txt"
             command = [sys.executable, runner.ROOT / "generate_instance.py", "--n", str(count),
-                       "--L", "10", "--w-min", "1", "--w-max", "100", "--v-max", "3",
+                       "--distribution", args.distribution, "--L", "10",
+                       "--w-min", "1", "--w-max", "100", "--v-max", str(max_speed),
                        "--a-max", "0", "--seed", str(args.seed), "--output", instance]
             if runner.run_logged(command, folder, stdout="generation.stdout.log",
                                  stderr="generation.stderr.log"):
@@ -166,11 +170,12 @@ def experiment(args):
                 if solver == "n2" and reference is None:
                     reference = final
                     reference_threads = threads
+                distribution = runner.save_distribution_errors(case, final, reference)
                 errors = runner.trajectory_errors(final, reference)
                 runner.write_csv(case / "error.csv", list(errors[0]), errors)
                 row = {"bodies": count, "solver": solver, "threads": threads, "steps": args.steps,
                        "dt": args.dt, "samples": args.samples, "reference_threads": reference_threads, "theta": args.theta if solver == "barnes-hut" else None,
-                       "order": args.order if solver == "fmm" else None, **summary}
+                       "order": args.order if solver == "fmm" else None, **summary, **distribution}
                 if args.parallel:
                     row.update(requested_threads=threads, effective_threads=threads)
                 for error in errors:
@@ -200,6 +205,8 @@ def parse_args(argv=None):
     parser.add_argument("--theta", type=float, default=0.5)
     parser.add_argument("--order", type=int, choices=range(1, 7), default=4)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--distribution", choices=("uniform", "clusters"), default="uniform",
+                        help="initial positions; clusters start from rest")
     parser.add_argument("--results-dir", type=Path)
     args = parser.parse_args(argv)
     if args.bodies is None:

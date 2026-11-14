@@ -59,8 +59,10 @@ test: all build/tests build/bench_steps
 	./build/tests
 	sh tests/test_cli.sh
 	sh tests/test_bench.sh
+	python3 tests/test_generate_instance.py
 	python3 tests/test_comparison.py
 	python3 tests/test_figures.py
+	python3 tests/test_distribution.py
 	python3 tests/test_profile_barnes_hut.py
 	python3 tests/test_solver_sweep.py
 	python3 tests/test_accuracy_tradeoff.py

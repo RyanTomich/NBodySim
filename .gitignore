@@ -10,3 +10,4 @@ __pycache__/
 /figures/*.pdf
 /figures/*.svg
 /figures/*.png
+/figures/parallel-sweep.csv

@@ -43,6 +43,7 @@ done
 
 # Exercise saved timing/reference metadata with a short existing-driver run.
 python3 - <<'PY'
+import csv
 import json
 from pathlib import Path
 import runpy
@@ -85,6 +86,12 @@ for solver in ("n2", "barnes-hut", "fmm"):
                 assert abs(sum(row["percent_of_total"] for row in summarize(rows, args.steps)) - 100) < 1e-9
             assert set(status["diagnostics"]) == expected
         assert runner["compare_n2"](binary, instance, folder, args)
+        with (folder / "timing/distribution-error.csv").open() as source:
+            distances = list(csv.DictReader(source))
+        actual = runner["read_state"](folder / "timing/final.txt")
+        reference = runner["read_state"](folder / "reference/final.txt")
+        assert [float(row["ks_distance"]) for row in distances] == [
+            row["ks_distance"] for row in runner["distribution_errors"](actual, reference)]
         for mode in ("timing", "reference"):
             saved = json.loads((folder / mode / "status.json").read_text())
             assert saved["status"] == "ok", saved

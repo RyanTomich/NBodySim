@@ -44,7 +44,8 @@ def verify_instance(args):
             if not args.w_min <= values[0] <= args.w_max:
                 raise ValueError(f"body {count} has an out-of-bounds property")
             position = tuple(values[1:4])
-            if not all(-args.L <= coordinate <= args.L for coordinate in position):
+            if args.distribution == "uniform" and not all(
+                    -args.L <= coordinate <= args.L for coordinate in position):
                 raise ValueError(f"body {count} has an out-of-bounds position")
             if position in positions:
                 raise ValueError(f"body {count} has a duplicate position")
@@ -65,38 +66,48 @@ def verify_instance(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, required=True, help="number of bodies")
-    parser.add_argument("--L", type=float, required=True, help="position bound")
+    parser.add_argument("--distribution", choices=("uniform", "clusters"), default="uniform",
+                        help="uniform cube (default) or eight Gaussian clusters at (+/-1, +/-1, +/-1)")
+    parser.add_argument("--L", type=float, help="position bound (required for uniform; ignored for clusters)")
     parser.add_argument("--w-min", type=float, required=True)
     parser.add_argument("--w-max", type=float, required=True)
     parser.add_argument("--v-max", type=float, required=True)
     parser.add_argument("--a-max", type=float, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--output", type=Path,
-                        help="output file (overwritten; default: bench/data/instance-nN-seedS.txt)")
+                        help="output file (overwritten; default: bench/data/instance-[clusters-]nN-seedS.txt)")
     args = parser.parse_args()
 
-    bounds = (args.L, args.w_min, args.w_max, args.v_max, args.a_max)
+    bounds = (args.w_min, args.w_max, args.v_max, args.a_max)
     if not all(math.isfinite(bound) for bound in bounds):
         parser.error("all bounds must be finite")
-    if args.n < 0 or args.L < 0 or args.v_max < 0 or args.a_max < 0:
-        parser.error("n, L, v-max, and a-max must be nonnegative")
+    if args.n < 0 or args.v_max < 0 or args.a_max < 0:
+        parser.error("n, v-max, and a-max must be nonnegative")
     if args.w_min > args.w_max:
         parser.error("w-min must not exceed w-max")
-    if args.n > 1 and args.L == 0:
-        parser.error("L must be positive for multiple distinct positions")
+    if args.distribution == "uniform":
+        if args.L is None or not math.isfinite(args.L) or args.L < 0:
+            parser.error("--L must be finite and nonnegative for uniform positions")
+        if args.n > 1 and args.L == 0:
+            parser.error("L must be positive for multiple distinct positions")
 
     if args.output is None:
+        prefix = "instance-clusters" if args.distribution == "clusters" else "instance"
         args.output = (Path(__file__).resolve().parent / "bench" / "data"
-                       / f"instance-n{args.n}-seed{args.seed}.txt")
+                       / f"{prefix}-n{args.n}-seed{args.seed}.txt")
 
     rng = random.Random(args.seed)
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as destination:
             destination.write(f"{args.n}\n")
-            for _ in range(args.n):
+            for i in range(args.n):
                 values = [uniform(rng, args.w_min, args.w_max)]
-                values.extend(uniform(rng, -args.L, args.L) for _ in range(3))
+                if args.distribution == "clusters":
+                    values.extend((1 if (i % 8) & (1 << k) else -1) + rng.gauss(0, 0.25)
+                                  for k in range(3))
+                else:
+                    values.extend(uniform(rng, -args.L, args.L) for _ in range(3))
                 values.extend(random_vector(rng, args.v_max))
                 values.extend(random_vector(rng, args.a_max))
                 destination.write(" ".join(format(value, ".17g") for value in values) + "\n")
