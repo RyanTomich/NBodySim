@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build and run timing experiments, optionally compare accuracy, and save results.
 
-The C driver times only simulate_with_solver(); Python summarizes its samples.
+The C driver times only the integrator call; Python summarizes its samples.
 """
 
 import argparse
@@ -20,6 +20,8 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+INTEGRATORS = ("leapfrog", "euler")
+BARNES_HUT_SOLVERS = ("serial-barnes-hut", "parallel-barnes-hut", "grouped-barnes-hut")
 
 
 def now():
@@ -37,10 +39,10 @@ def write_csv(path, fields, rows):
         writer.writerows(rows)
 
 
-def run_logged(command, directory, stdout="stdout.log", stderr="stderr.log"):
+def run_logged(command, directory, stdout="stdout.log", stderr="stderr.log", env=None):
     """Save process output; stderr=None combines both streams in stdout's file."""
     command = [str(part) for part in command]
-    environment = {**os.environ, "LC_ALL": "C"}
+    environment = {**os.environ, **(env or {}), "LC_ALL": "C"}
     with ExitStack() as files:
         out = files.enter_context((directory / stdout).open("w"))
         err = files.enter_context((directory / stderr).open("w")) if stderr else out
@@ -123,32 +125,86 @@ def trajectory_errors(actual, reference):
     return rows
 
 
+# Columns in the saved w x y z vx vy vz ax ay az state format.
+DISTRIBUTION_COMPONENTS = (("position", "x", 1), ("position", "y", 2),
+                           ("position", "z", 3), ("acceleration", "ax", 7),
+                           ("acceleration", "ay", 8), ("acceleration", "az", 9))
+
+
+def distribution_errors(actual, reference):
+    """Unweighted marginal CDF distances from two final states, ignoring body order."""
+    if not actual or len(actual) != len(reference):
+        raise ValueError("Distribution comparison requires equal nonzero body counts")
+    for state in (actual, reference):
+        if any(len(row) != 10 or any(not math.isfinite(value) for value in row)
+               or row[0] <= 0 for row in state):
+            raise ValueError("Distribution comparison requires finite states with positive masses")
+    rows = []
+    count = len(actual)
+    for field, component, column in DISTRIBUTION_COMPONENTS:
+        a = sorted(row[column] for row in actual)
+        b = sorted(row[column] for row in reference)
+        i = j = maximum = 0
+        while i < count or j < count:
+            value = min(a[i] if i < count else math.inf,
+                        b[j] if j < count else math.inf)
+            # Both right-continuous CDFs must consume all ties together.
+            while i < count and a[i] == value:
+                i += 1
+            while j < count and b[j] == value:
+                j += 1
+            maximum = max(maximum, abs(i - j))
+        rows.append({"field": field, "component": component,
+                     "ks_distance": maximum / count})
+    return rows
+
+
+def distribution_summary(rows):
+    return {field + "_ks_max": max(row["ks_distance"] for row in rows if row["field"] == field)
+            for field in ("position", "acceleration")}
+
+
+def save_distribution_errors(directory, actual, reference):
+    rows = distribution_errors(actual, reference)
+    write_csv(directory / "distribution-error.csv", list(rows[0]), rows)
+    return distribution_summary(rows)
+
+
+def force_evaluations(integrator, steps, count):
+    return steps + (integrator == "leapfrog") if count and steps else 0
+
+
 def compare_n2(binary, instance, folder, args):
     """Compare the timed final state with one unmeasured n2 reference run."""
     directory = folder / "reference"
     directory.mkdir()
+    integrator = getattr(args, "integrator", "leapfrog")
     status = {"solver": "n2", "steps": args.steps, "dt": args.dt,
+              "integrator": integrator,
               "started": now(), "status": "failed"}
     reference = None
     try:
         command = [binary, instance, str(args.dt), str(args.steps), "1", "0",
                    "reference", directory / "final.txt", "n2"]
-        if run_logged(command, directory):
+        if run_logged(command, directory, env={"NBODY_INTEGRATOR": integrator}):
             raise RuntimeError("n2 reference failed; see reference/stderr.log.")
         reference = read_state(directory / "final.txt")
         validate_bodies(reference, read_state(instance))
+        status["force_evaluations_per_run"] = force_evaluations(integrator, args.steps, len(reference))
         status["status"] = "ok"
     except (OSError, ValueError, RuntimeError) as error:
         status["error"] = str(error)
     status["finished"] = now()
     write_json(directory / "status.json", status)
-    comparison = {"solver": args.solver, "reference_solver": "n2",
+    comparison = {"solver": args.solver, "reference_solver": "n2", "integrator": integrator,
                   "started": now(), "status": "failed"}
     timing = folder / "timing"
     try:
         if status["status"] != "ok":
             raise RuntimeError(status["error"])
-        rows = trajectory_errors(read_state(timing / "final.txt"), reference)
+        actual = read_state(timing / "final.txt")
+        comparison.update(save_distribution_errors(timing, actual, reference))
+        rows = trajectory_errors(actual, reference)
         write_csv(timing / "error.csv", list(rows[0]), rows)
         comparison["status"] = "ok"
     except (OSError, ValueError, RuntimeError) as error:
@@ -177,16 +233,18 @@ def driver_metadata(directory, status):
     path = directory / "stderr.log"
     if path.exists():
         for line in path.read_text().splitlines():
-            if line.startswith(("approximate_config: ", "solver_config: ")):
+            if line.startswith("solver_config: "):
                 status.update(json.loads(line.split(": ", 1)[1]))
-            elif line.startswith(("approximate_totals: ", "solver_totals: ")):
+            elif line.startswith("solver_totals: "):
                 status["diagnostics"] = json.loads(line.split(": ", 1)[1])
 
 
 def collect_timing(binary, instance, directory, args):
     """Run warmups and timing samples, then save per-step statistics and status."""
     directory.mkdir()
+    integrator = getattr(args, "integrator", "leapfrog")
     status = {"mode": "timing", "solver": args.solver, "steps": args.steps, "dt": args.dt,
+              "integrator": integrator,
               "started": now(), "status": "failed"}
     summary = None
     theta = args.theta
@@ -200,13 +258,17 @@ def collect_timing(binary, instance, directory, args):
         if "order" in status:
             driver.extend(["order", str(status["order"])])
 
-        if run_logged(driver, directory, stdout="samples.csv"):
+        if run_logged(driver, directory, stdout="samples.csv",
+                      env={"NBODY_INTEGRATOR": integrator}):
             raise RuntimeError("Benchmark failed; see stderr.log.")
         with (directory / "samples.csv").open(newline="") as source:
             durations = [float(row["seconds"]) for row in csv.DictReader(source)]
         if len(durations) != args.samples:
             raise ValueError("Unexpected number of timing samples.")
+        count = len(read_state(directory / "final.txt"))
+        status["force_evaluations_per_run"] = force_evaluations(integrator, args.steps, count)
         summary = {"solver": args.solver, "theta": theta, "order": status.get("order"),
+                   "integrator": integrator,
                    "steps": args.steps, "dt": args.dt,
                    **timing_summary(durations, args.steps)}
         write_csv(directory / "summary.csv", list(summary), [summary])
@@ -271,7 +333,7 @@ def experiment(args):
             except OSError as error:
                 write_json(folder / "status.json", {"status": "failed", "error": str(error)})
                 failed = True
-        fields = ["instance", "solver", "theta", "order", "steps", "dt", "samples",
+        fields = ["instance", "solver", "theta", "order", "integrator", "steps", "dt", "samples",
                   "mean_seconds_per_step", "variance_seconds_per_step_squared",
                   "stddev_seconds_per_step"]
         write_csv(directory / "timing-summary.csv", fields, summaries)
@@ -302,6 +364,7 @@ def parse_args(argv=None):
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--solver", default="n2")
+    parser.add_argument("--integrator", choices=INTEGRATORS, default="leapfrog")
     parser.add_argument("--order", help="FMM expansion order (1 through 6)")
     parser.add_argument("--theta", type=float,
                         help="solver opening parameter (default supplied by the solver)")
@@ -310,10 +373,6 @@ def parse_args(argv=None):
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results",
                         help="parent directory for automatically named experiments (default: results/)")
     args = parser.parse_args(argv)
-    if args.solver == "direct":
-        parser.error("solver direct was renamed to n2")
-    if args.solver == "approximate":
-        parser.error("solver approximate was renamed to barnes-hut")
     if args.theta is not None and args.order is not None:
         parser.error("--theta and --order apply to different solvers")
     if args.theta is not None:

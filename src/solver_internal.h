@@ -18,8 +18,11 @@ struct SolverDescriptor {
     void (*diagnostics)(const void *solver_context, MetadataVisitor visit, void *visitor_context);
 };
 extern const SolverDescriptor n2_solver;
-extern const SolverDescriptor barnes_hut_solver;
+extern const SolverDescriptor serial_barnes_hut_solver;
+extern const SolverDescriptor grouped_barnes_hut_solver;
+#ifdef _OPENMP
 extern const SolverDescriptor parallel_barnes_hut_solver;
+#endif
 extern const SolverDescriptor fmm_solver;
 
 #endif

@@ -1,37 +1,104 @@
 #include "state_internal.h"
+#include "integrator_internal.h"
+#include <string.h>
+#ifdef NBODY_BENCH_STEPS
+#include "step_timing.h"
+#endif
 
-static void publish_acceleration(Simulation *s)
+static void kick_drift(size_t count, double dt, double half_dt,
+                          double *restrict x, double *restrict y, double *restrict z,
+                          double *restrict vx, double *restrict vy, double *restrict vz,
+                          const double *restrict ax, const double *restrict ay,
+                          const double *restrict az)
 {
-    double *old = s->ax; s->ax = s->next_ax; s->next_ax = old;
-    old = s->ay; s->ay = s->next_ay; s->next_ay = old;
-    old = s->az; s->az = s->next_az; s->next_az = old;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (size_t i = 0; i < count; ++i) {
+        double vx_half = vx[i] + half_dt * ax[i];
+        double vy_half = vy[i] + half_dt * ay[i];
+        double vz_half = vz[i] + half_dt * az[i];
+        vx[i] = vx_half;
+        vy[i] = vy_half;
+        vz[i] = vz_half;
+        x[i] += dt * vx_half;
+        y[i] += dt * vy_half;
+        z[i] += dt * vz_half;
+    }
 }
 
-void simulate_leapfrog_with_solver(Simulation *s, double dt, size_t steps,
+static void finish_kick(size_t count, double half_dt,
+                        double *restrict vx, double *restrict vy, double *restrict vz,
+                        const double *restrict ax, const double *restrict ay,
+                        const double *restrict az)
+{
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (size_t i = 0; i < count; ++i) {
+        vx[i] += half_dt * ax[i];
+        vy[i] += half_dt * ay[i];
+        vz[i] += half_dt * az[i];
+    }
+}
+
+static void refresh_acceleration(Simulation *simulation, AccelerationSolver solver, void *context)
+{
+    const SimulationView state = simulation_view(simulation);
+    solver(&state, simulation->next_ax, simulation->next_ay,
+           simulation->next_az, context);
+
+    /* Publish only after every interaction has read the whole input state. */
+    double *previous_ax = simulation->ax;
+    double *previous_ay = simulation->ay;
+    double *previous_az = simulation->az;
+    simulation->ax = simulation->next_ax;
+    simulation->ay = simulation->next_ay;
+    simulation->az = simulation->next_az;
+    simulation->next_ax = previous_ax;
+    simulation->next_ay = previous_ay;
+    simulation->next_az = previous_az;
+}
+
+void simulate_leapfrog_with_solver(Simulation *simulation, double dt, size_t steps,
                                    AccelerationSolver solver, void *context)
 {
-    if (!steps || !s->count) return;
-    /* Compute each backend's own starting acceleration, then reuse it between
-     * kicks. Supplied accelerations are not assumed consistent with the solver. */
-    SimulationView view = simulation_view(s);
-    solver(&view, s->next_ax, s->next_ay, s->next_az, context);
-    publish_acceleration(s);
-    for (size_t step = 0; step < steps; ++step) {
-        for (size_t i = 0; i < s->count; ++i) {
-            s->vx[i] += 0.5 * dt * s->ax[i];
-            s->vy[i] += 0.5 * dt * s->ay[i];
-            s->vz[i] += 0.5 * dt * s->az[i];
-            s->x[i] += dt * s->vx[i];
-            s->y[i] += dt * s->vy[i];
-            s->z[i] += dt * s->vz[i];
-        }
-        view = simulation_view(s);
-        solver(&view, s->next_ax, s->next_ay, s->next_az, context);
-        publish_acceleration(s);
-        for (size_t i = 0; i < s->count; ++i) {
-            s->vx[i] += 0.5 * dt * s->ax[i];
-            s->vy[i] += 0.5 * dt * s->ay[i];
-            s->vz[i] += 0.5 * dt * s->az[i];
-        }
+    const size_t count = simulation->count;
+    if (steps == 0 || count == 0) {
+        return;
     }
+    const double half_dt = 0.5 * dt;
+    /* Mutable public views make accelerations from any earlier call untrusted. */
+    refresh_acceleration(simulation, solver, context);
+#ifdef NBODY_BENCH_STEPS
+    benchmark_step_boundary(0);
+#endif
+    for (size_t step = 0; step < steps; ++step) {
+        kick_drift(count, dt, half_dt, simulation->x, simulation->y, simulation->z,
+                   simulation->vx, simulation->vy, simulation->vz,
+                   simulation->ax, simulation->ay, simulation->az);
+        refresh_acceleration(simulation, solver, context);
+        finish_kick(count, half_dt, simulation->vx, simulation->vy, simulation->vz,
+                    simulation->ax, simulation->ay, simulation->az);
+#ifdef NBODY_BENCH_STEPS
+        benchmark_step_boundary(step + 1);
+#endif
+    }
+}
+
+void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
+                          AccelerationSolver solver, void *context)
+{
+    simulate_leapfrog_with_solver(simulation, dt, steps, solver, context);
+}
+
+Integrate parse_integrator(const char *name)
+{
+    if (!name || strcmp(name, "leapfrog") == 0) {
+        return simulate_with_solver;
+    }
+    if (strcmp(name, "euler") == 0) {
+        return simulate_euler_with_solver;
+    }
+    return NULL;
 }

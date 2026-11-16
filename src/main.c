@@ -1,6 +1,7 @@
 #include "solver.h"
 #include "io.h"
 #include "parse.h"
+#include "integrator_internal.h"
 #include "nbody.h"
 
 #include <stdio.h>
@@ -17,14 +18,21 @@ int main(int argc, char **argv)
     SolverOption options[2];
     size_t option_count = 0;
     bool solver_set = false;
+    const char *integrator_name = NULL;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--solver") == 0) {
             if (solver_set || ++i == argc) {
-                fprintf(stderr, "Expected --solver n2|serial-barnes-hut|parallel-barnes-hut|fmm once.\n");
+                fprintf(stderr, "Expected --solver NAME once.\n");
                 return EXIT_FAILURE;
             }
             solver_name = argv[i];
             solver_set = true;
+        } else if (strcmp(argv[i], "--integrator") == 0) {
+            if (integrator_name || ++i == argc) {
+                fprintf(stderr, "Expected --integrator leapfrog|euler once.\n");
+                return EXIT_FAILURE;
+            }
+            integrator_name = argv[i];
         } else if (strcmp(argv[i], "--theta") == 0 || strcmp(argv[i], "--order") == 0) {
             const char *name = argv[i] + 2;
             if (++i == argc || option_count == 2) {
@@ -40,7 +48,18 @@ int main(int argc, char **argv)
         }
     }
     if (positional_count != 3) {
-        fprintf(stderr, "Usage: %s [--solver n2|serial-barnes-hut|parallel-barnes-hut|fmm] [--theta VALUE | --order P] INPUT DT STEPS\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--solver NAME] [--integrator leapfrog|euler] [--theta VALUE | --order P] INPUT DT STEPS\n",
+                argv[0]);
+        fputs("Solvers:", stderr);
+        for (size_t i = 0; i < solver_count(); ++i) {
+            fprintf(stderr, " %s", solver_name_at(i));
+        }
+        fputc('\n', stderr);
+        return EXIT_FAILURE;
+    }
+    Integrate integrate = parse_integrator(integrator_name);
+    if (!integrate) {
+        fprintf(stderr, "Integrator must be leapfrog or euler.\n");
         return EXIT_FAILURE;
     }
     if (!parse_double(positional[1], &dt) || dt <= 0.0 || !parse_size(positional[2], &steps)) {
@@ -70,7 +89,7 @@ int main(int argc, char **argv)
         simulation_destroy(simulation);
         return EXIT_FAILURE;
     }
-    simulate_with_solver(simulation, dt, steps, solver.acceleration, solver.context);
+    integrate(simulation, dt, steps, solver.acceleration, solver.context);
     solver_destroy(&solver);
     bool written = write_bodies(stdout, simulation);
     simulation_destroy(simulation);

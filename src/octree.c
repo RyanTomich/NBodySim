@@ -195,3 +195,43 @@ bool octree_build(const SimulationView *state, Octree *workspace)
     return true;
 }
 
+bool octree_membership_is_valid(const SimulationView *state, const Octree *tree)
+{
+    if (state->count != tree->count) {
+        return false;
+    }
+    if (state->count == 0) {
+        return tree->node_count == 0;
+    }
+    /* Build failures leave node_count zero, even after an earlier valid tree. */
+    if (!tree->nodes || !tree->indices || tree->node_count == 0
+        || tree->node_count > tree->node_capacity) {
+        return false;
+    }
+    const double *coordinates[] = {state->x, state->y, state->z};
+    for (size_t n = 0; n < tree->node_count; ++n) {
+        const OctreeNode *node = &tree->nodes[n];
+        if (!node->is_leaf) {
+            continue;
+        }
+        const double center[] = {node->center.x, node->center.y, node->center.z};
+        if (!isfinite(node->half_width) || node->half_width <= 0.0) {
+            return false;
+        }
+        for (size_t p = node->begin; p < node->end; ++p) {
+            size_t i = tree->indices[p];
+            for (size_t axis = 0; axis < 3; ++axis) {
+                double position = coordinates[axis][i];
+                double displacement = position - center[axis];
+                /* A rounded difference equal to half_width could hide an
+                 * outside point. Rebuild on equality rather than widen a cell.
+                 * Subtraction also avoids rounding expanded cube endpoints. */
+                if (!isfinite(position) || !isfinite(center[axis])
+                    || !isfinite(displacement) || fabs(displacement) >= node->half_width) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}

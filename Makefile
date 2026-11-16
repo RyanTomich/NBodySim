@@ -8,48 +8,89 @@ else
 $(error LTO must be 0 or 1)
 endif
 
-CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic
-override CFLAGS += -O3 -g -fno-omit-frame-pointer -fno-fast-math -UNDEBUG $(LTO_FLAGS)
-# OpenMP is required by parallel-barnes-hut. Override for other installations.
+OPENMP ?= 1
 ifeq ($(shell uname -s),Darwin)
-OMPFLAGS ?= -Xclang -fopenmp -isystem /opt/homebrew/opt/libomp/include
-OMPLIBS ?= -L/opt/homebrew/opt/libomp/lib -lomp
+ifeq ($(shell uname -m),arm64)
+BREW_PREFIX := /opt/homebrew
+else
+BREW_PREFIX := /usr/local
+endif
+ifneq ($(wildcard $(BREW_PREFIX)/opt/libomp/include/omp.h),)
+OMPFLAGS ?= -Xclang -fopenmp -isystem $(BREW_PREFIX)/opt/libomp/include
+OMPLIBS ?= -L$(BREW_PREFIX)/opt/libomp/lib -lomp
+else ifneq ($(wildcard $(BREW_PREFIX)/opt/llvm/bin/clang),)
+OMPFLAGS ?= -Xclang -fopenmp -idirafter $(shell $(BREW_PREFIX)/opt/llvm/bin/clang -print-resource-dir)/include
+OMPLIBS ?= -L$(BREW_PREFIX)/opt/llvm/lib -lomp
+else
+OMPFLAGS ?= -Xclang -fopenmp -isystem $(BREW_PREFIX)/opt/libomp/include
+OMPLIBS ?= -L$(BREW_PREFIX)/opt/libomp/lib -lomp
+endif
 else
 OMPFLAGS ?= -fopenmp
 OMPLIBS ?= -fopenmp
 endif
-override CFLAGS += $(OMPFLAGS)
-LDLIBS += $(OMPLIBS) -lm
+ifeq ($(OPENMP),1)
+OPENMP_FLAGS := $(OMPFLAGS) -DNBODY_REQUIRE_OPENMP
+OPENMP_LIBS := $(OMPLIBS)
+else ifeq ($(OPENMP),0)
+OPENMP_FLAGS :=
+OPENMP_LIBS :=
+else
+$(error OPENMP must be 0 or 1)
+endif
+
+CFLAGS ?= -std=c17 -Wall -Wextra -Wpedantic
+override CFLAGS += -O3 -g -fno-omit-frame-pointer -fno-fast-math -UNDEBUG $(LTO_FLAGS)
+LDLIBS += -lm
 
 SOURCES := $(wildcard src/*.c)
 LIB_SOURCES := $(filter-out src/main.c,$(SOURCES))
 TEST_SOURCES := $(wildcard tests/*.c) $(LIB_SOURCES)
 BENCH_SOURCES := $(wildcard bench/*.c) $(LIB_SOURCES)
-HEADERS := $(wildcard src/*.h src/generated/*.h tests/*.h)
+HEADERS := $(wildcard src/*.h src/generated/*.h tests/*.h bench/*.h)
 
 .PHONY: all test clean print-config
 
 all: build/app build/bench
 
 build/app: $(SOURCES) $(HEADERS) Makefile | build
-	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc $(SOURCES) $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -Isrc $(SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
 
 build/bench: $(BENCH_SOURCES) $(HEADERS) Makefile | build
-	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc $(BENCH_SOURCES) $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -Isrc $(BENCH_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
+
+# Serial, opt-in per-step observation; ordinary benchmark binaries are unchanged.
+build/bench_steps: $(BENCH_SOURCES) $(HEADERS) Makefile | build
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -DNBODY_BENCH_STEPS -Ibench -Isrc $(BENCH_SOURCES) $(LDLIBS) -o $@
+
+build/bench_steps_openmp: $(BENCH_SOURCES) $(HEADERS) Makefile | build
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -DNBODY_BENCH_STEPS -DNBODY_BENCH_OPENMP -Ibench -Isrc $(BENCH_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
 
 build/tests: $(TEST_SOURCES) $(HEADERS) Makefile | build
-	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -Isrc $(TEST_SOURCES) $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -Isrc $(TEST_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
 
 build:
 	mkdir -p $@
 
-test: all build/tests
+test: all build/tests build/bench_steps
 	./build/tests
 	sh tests/test_cli.sh
 	sh tests/test_bench.sh
+	python3 tests/test_generate_instance.py
+	python3 tests/test_comparison.py
+	python3 tests/test_figures.py
+	python3 tests/test_distribution.py
+	python3 tests/test_profile_barnes_hut.py
+	python3 tests/test_solver_sweep.py
+	python3 tests/test_accuracy_tradeoff.py
+
+ifeq ($(OPENMP),1)
+test: build/bench_steps_openmp
+endif
 
 print-config:
 	@printf '%s\n' 'CC=$(CC)' 'LTO=$(LTO)' 'LTO_FLAGS=$(LTO_FLAGS)' \
+	    'OPENMP=$(OPENMP)' 'OPENMP_FLAGS=$(OPENMP_FLAGS)' 'OPENMP_LIBS=$(OPENMP_LIBS)' \
 	    'CPPFLAGS=$(CPPFLAGS)' 'CFLAGS=$(CFLAGS)' 'LDFLAGS=$(LDFLAGS)' 'LDLIBS=$(LDLIBS)'
 
 clean:

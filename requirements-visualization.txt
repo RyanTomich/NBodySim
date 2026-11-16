@@ -1,0 +1,5 @@
+# Optional presentation dependencies; not used by the simulator or benchmarks.
+numpy
+pyvista
+imageio
+imageio-ffmpeg

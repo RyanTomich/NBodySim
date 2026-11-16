@@ -1,7 +1,13 @@
 #include "solver_internal.h"
 #include <string.h>
 
-static const SolverDescriptor *const registry[] = {&n2_solver, &barnes_hut_solver, &parallel_barnes_hut_solver, &fmm_solver};
+static const SolverDescriptor *const registry[] = {
+    &n2_solver, &serial_barnes_hut_solver,
+#ifdef _OPENMP
+    &parallel_barnes_hut_solver,
+#endif
+    &grouped_barnes_hut_solver, &fmm_solver
+};
 
 size_t solver_count(void)
 {
@@ -18,7 +24,6 @@ bool solver_create(Solver *solver, const char *name, size_t count,
 {
     *solver = (Solver){0};
     *error = NULL;
-    if (strcmp(name, "barnes-hut") == 0) name = "serial-barnes-hut";
     for (size_t i = 0; i < option_count; ++i) {
         for (size_t j = 0; j < i; ++j) {
             if (strcmp(options[i].name, options[j].name) == 0) {
@@ -44,8 +49,15 @@ bool solver_create(Solver *solver, const char *name, size_t count,
         *solver = (Solver){descriptor->acceleration, solver_context, descriptor};
         return true;
     }
-    *error = strcmp(name, "approximate") == 0
-           ? "Solver approximate was renamed to barnes-hut." : "Unknown solver.";
+    if (strcmp(name, "barnes-hut") == 0) {
+        *error = "Choose serial-barnes-hut, parallel-barnes-hut, or grouped-barnes-hut.";
+#ifndef _OPENMP
+    } else if (strcmp(name, "parallel-barnes-hut") == 0) {
+        *error = "parallel-barnes-hut requires an OpenMP build (OPENMP=1).";
+#endif
+    } else {
+        *error = "Unknown solver.";
+    }
     return false;
 }
 

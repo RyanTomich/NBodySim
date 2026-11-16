@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1500" height="820" viewBox="0 0 1500 820" role="img" aria-labelledby="title desc">
 <title id="title">N-body simulator module flowchart</title>
-<desc id="desc">Main orchestrates a CLI simulation with state I/O and numeric parsing, owned simulation state, backend lifecycle management and forward Euler time stepping. solver.c selects and prepares a backend; euler.c invokes its acceleration callback each step. Barnes–Hut owns monopole aggregation and traversal; FMM owns multipole construction, tree interactions and local evaluation. Both tree solvers use direct particle interactions and a bounded spatial hierarchy, with all-pairs fallback. laplace.c prepares Cartesian expansion tables and translates multipoles to local expansions, using generated unrolled arithmetic at order four. Secondary parsing, lifecycle and state-view calls are omitted.</desc>
+<desc id="desc">Main orchestrates CLI input, state ownership, backend setup, and integrator selection. Kick-drift-kick leapfrog is the default and refreshes the initial acceleration. Forward Euler uses the supplied acceleration for its first velocity update. Both use one position-dependent force callback per step. The registered solvers are direct n2, serial Barnes–Hut, particle-parallel Barnes–Hut, grouped Barnes–Hut, and FMM. The serial and grouped Barnes–Hut backends share a bounded bucket octree with FMM; the particle-parallel backend uses its own single-particle-leaf tree. Serial and particle-parallel Barnes–Hut and FMM can fall back to direct forces. Laplace expansion translations use generated arithmetic at order four.</desc>
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#64748b"/></marker></defs>
 <rect width="1500" height="820" fill="white"/>
 <path d="M700 80 L700 115 L190 115 L190 150" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>M to IO</title></path>
@@ -11,11 +11,11 @@
 <path d="M875 310 L490 310 L490 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>CB to N2</title></path>
 <path d="M1040 340 L1040 375 L820 375 L820 410" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>CB to BH</title></path>
 <path d="M1040 340 L1040 375 L1190 375 L1190 410" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>CB to F</title></path>
-<path d="M710 440 L550 440 L550 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)" stroke-dasharray="6 5"><title>BH to N2: fallback</title></path>
 <path d="M1190 470 L1190 500 L590 500 L590 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)" stroke-dasharray="6 5"><title>F to N2: fallback</title></path>
-<path d="M790 470 L790 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>BH to G</title></path>
+<path d="M655 477 L575 477 L575 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)" stroke-dasharray="6 5"><title>Serial and particle-parallel Barnes–Hut fallback</title></path>
+<path d="M790 490 L790 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>BH to G</title></path>
 <path d="M1160 470 L1160 530 L880 530 L880 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>F to G</title></path>
-<path d="M850 470 L850 515 L1040 515 L1040 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>BH to O</title></path>
+<path d="M850 490 L850 515 L1040 515 L1040 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>BH to O</title></path>
 <path d="M1190 470 L1190 545 L1120 545 L1120 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>F to O</title></path>
 <path d="M1300 440 L1330 440 L1330 560" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>F to L</title></path>
 <path d="M1330 620 L1330 710" fill="none" stroke="#64748b" stroke-width="2" stroke-linejoin="round" marker-end="url(#arrow)"><title>L to GEN</title></path>
@@ -36,16 +36,16 @@
 <text x="890" y="198">backend lifecycle and metadata</text>
 </g>
 <g id="E" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="1080" y="150" width="300" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
-<text x="1230" y="175">euler.c</text>
-<text x="1230" y="198">forward Euler time stepping</text>
+<text x="1230" y="175">leapfrog.c / euler.c</text>
+<text x="1230" y="198">default leapfrog or explicit Euler</text>
 </g>
 <g id="CB" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="875" y="280" width="330" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
 <text x="1040" y="305">AccelerationSolver</text>
-<text x="1040" y="328">per-step gravity callback</text>
+<text x="1040" y="328">position-dependent forces</text>
 </g>
-<g id="BH" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="710" y="410" width="220" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
-<text x="820" y="435">barnes_hut.c</text>
-<text x="820" y="458">monopole tree solver</text>
+<g id="BH" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="655" y="410" width="330" height="80" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
+<text x="820" y="435">Barnes–Hut backends</text>
+<text x="820" y="458">serial · particle parallel · grouped</text>
 </g>
 <g id="F" font-family="Arial, Helvetica, sans-serif" font-size="18" text-anchor="middle" fill="#1e293b"><rect x="1080" y="410" width="220" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
 <text x="1190" y="435">fmm.c</text>

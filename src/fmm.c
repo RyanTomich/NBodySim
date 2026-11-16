@@ -10,12 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 typedef struct {
     Octree tree;
     size_t direct_pair_cutoff;
     CartesianTerms expansion;
     double *moments, *locals;
-    double polynomial[CARTESIAN_MAX_TERMS], kernel[CARTESIAN_MAX_TERMS];
+    /* Per-node occupied extent about the cell center, refreshed in the upward pass. */
+    double *occupied_half_width;
+    double polynomial[CARTESIAN_MAX_TERMS];
     size_t calls, translations, direct_evaluations, capacity_limited_leaves, direct_fallbacks;
 } Fmm;
 
@@ -25,6 +31,7 @@ static void destroy(void *solver_context)
     octree_destroy(&f->tree);
     free(f->moments);
     free(f->locals);
+    free(f->occupied_half_width);
     free(f);
 }
 
@@ -59,7 +66,9 @@ static bool create(void **solver_context, size_t count, const SolverOption *opti
     size_t bytes = capacity * f->expansion.terms * sizeof(double);
     f->moments = malloc(bytes);
     f->locals = malloc(bytes);
-    if (!f->moments || !f->locals) {
+    /* The expansion allocation bound above also covers one double per node. */
+    f->occupied_half_width = malloc(capacity * sizeof(*f->occupied_half_width));
+    if (!f->moments || !f->locals || !f->occupied_half_width) {
         destroy(f);
         return false;
     }
@@ -124,7 +133,7 @@ static double max_axis_distance(Vec3 a, Vec3 b)
 static bool upward_pass(Fmm *f, const SimulationView *state)
 {
     for (size_t n = f->tree.node_count; n-- > 0;) {
-        OctreeNode *cell = &f->tree.nodes[n];
+        const OctreeNode *cell = &f->tree.nodes[n];
         double *moments = f->moments + n * f->expansion.terms;
         double extent = 0.0;
         if (cell->is_leaf) {
@@ -143,13 +152,13 @@ static bool upward_pass(Fmm *f, const SimulationView *state)
                 if (cell->children[c] != SIZE_MAX) {
                     const OctreeNode *child = &f->tree.nodes[cell->children[c]];
                     double enclosing = max_axis_distance(child->center, cell->center)
-                                     + child->occupied_half_width;
+                                     + f->occupied_half_width[cell->children[c]];
                     extent = fmax(extent, enclosing);
                     shift(f, n, cell->children[c], true);
                 }
             }
         }
-        cell->occupied_half_width = fmin(cell->half_width, nextafter(extent, INFINITY));
+        f->occupied_half_width[n] = fmin(cell->half_width, nextafter(extent, INFINITY));
         if (!finite_terms(moments, f->expansion.terms)) {
             return false;
         }
@@ -162,7 +171,13 @@ typedef struct {
     double *acceleration[3];
 } Field;
 
-static void evaluate_direct_pair(Fmm *f, const Field *field,
+/* One traversal owns its scratch and counts, and writes only its targets. */
+typedef struct {
+    double kernel[CARTESIAN_MAX_TERMS];
+    size_t translations, direct_evaluations;
+} FmmInteraction;
+
+static void evaluate_direct_pair(const Fmm *f, const Field *field, FmmInteraction *work,
                                  const OctreeNode *s, const OctreeNode *t)
 {
     for (size_t p = t->begin; p < t->end; ++p) {
@@ -174,18 +189,19 @@ static void evaluate_direct_pair(Fmm *f, const Field *field,
         field->acceleration[0][i] = sum.x;
         field->acceleration[1][i] = sum.y;
         field->acceleration[2][i] = sum.z;
-        f->direct_evaluations += (s->end - s->begin) - (s->begin <= p && p < s->end);
+        work->direct_evaluations += (s->end - s->begin) - (s->begin <= p && p < s->end);
     }
 }
 
-static bool interact(Fmm *f, Field *field, size_t source, size_t target)
+static bool interact(const Fmm *f, const Field *field, FmmInteraction *work,
+                     size_t source, size_t target)
 {
     const OctreeNode *s = &f->tree.nodes[source], *t = &f->tree.nodes[target];
     /* Every occupied node is nonempty. Division keeps the pair count test
      * valid even for ranges whose product would overflow size_t. */
     size_t source_count = s->end - s->begin, target_count = t->end - t->begin;
     if (f->direct_pair_cutoff && source_count <= f->direct_pair_cutoff / target_count) {
-        evaluate_direct_pair(f, field, s, t);
+        evaluate_direct_pair(f, field, work, s, t);
         return true;
     }
     double dx = t->center.x - s->center.x, dy = t->center.y - s->center.y;
@@ -194,26 +210,77 @@ static bool interact(Fmm *f, Field *field, size_t source, size_t target)
     if (!isfinite(r)) {
         return false;
     }
-    if (r > 0 && (s->occupied_half_width + t->occupied_half_width) <= r * (0.5 / sqrt(3.0))) {
+    if (r > 0 && (f->occupied_half_width[source] + f->occupied_half_width[target])
+                <= r * (0.5 / sqrt(3.0))) {
         double unit[] = {dx / r, dy / r, dz / r};
         laplace_translate(&f->expansion, f->moments + source * f->expansion.terms,
-                          s->half_width, t->half_width, unit, r, f->kernel,
+                          s->half_width, t->half_width, unit, r, work->kernel,
                           f->locals + target * f->expansion.terms);
-        ++f->translations;
+        ++work->translations;
     } else if (s->is_leaf && t->is_leaf) {
-        evaluate_direct_pair(f, field, s, t);
+        evaluate_direct_pair(f, field, work, s, t);
     } else {
         bool split_target = s->is_leaf || (!t->is_leaf && t->half_width >= s->half_width);
         const OctreeNode *split = split_target ? t : s;
         for (int c = 0; c < 8; ++c) {
             size_t child = split->children[c];
             if (child != SIZE_MAX &&
-                !interact(f, field, split_target ? source : child, split_target ? child : target)) {
+                !interact(f, field, work, split_target ? source : child, split_target ? child : target)) {
                 return false;
             }
         }
     }
     return true;
+}
+
+static bool interaction_pass(Fmm *f, const Field *field)
+{
+    size_t targets[8] = {0};
+    int jobs = 1;
+#ifdef _OPENMP
+    int workers = omp_get_max_threads();
+    const OctreeNode *root = &f->tree.nodes[0];
+    if (workers > 1 && field->state->count >= 1024 && !root->is_leaf) {
+        jobs = 0;
+        for (int c = 0; c < 8; ++c) {
+            if (root->children[c] != SIZE_MAX) {
+                targets[jobs++] = root->children[c];
+            }
+        }
+        if (jobs < 2) {
+            jobs = 1;
+            targets[0] = 0;
+        }
+    }
+    if (workers > jobs) {
+        workers = jobs;
+    }
+#endif
+    FmmInteraction work[8];
+    bool valid[8];
+    for (int i = 0; i < jobs; ++i) {
+        work[i].translations = work[i].direct_evaluations = 0;
+    }
+#ifdef _OPENMP
+    if (jobs > 1) {
+        /* Root-to-root traversal first splits the target. Its child subtrees
+         * have disjoint outputs; each retains the original source order. */
+#pragma omp parallel for schedule(dynamic, 1) num_threads(workers)
+        for (int i = 0; i < jobs; ++i) {
+            valid[i] = interact(f, field, &work[i], 0, targets[i]);
+        }
+    } else
+#endif
+    {
+        valid[0] = interact(f, field, &work[0], 0, targets[0]);
+    }
+    bool success = true;
+    for (int i = 0; i < jobs; ++i) {
+        f->translations += work[i].translations;
+        f->direct_evaluations += work[i].direct_evaluations;
+        success = valid[i] && success;
+    }
+    return success;
 }
 
 static bool downward_pass(Fmm *f, Field *field)
@@ -271,7 +338,7 @@ static void evaluate(const SimulationView *state, double *ax, double *ay, double
         for (int axis = 0; axis < 3; ++axis) {
             memset(field.acceleration[axis], 0, state->count * sizeof(double));
         }
-        if (upward_pass(f, state) && interact(f, &field, 0, 0) && downward_pass(f, &field)) {
+        if (upward_pass(f, state) && interaction_pass(f, &field) && downward_pass(f, &field)) {
             return;
         }
     }

@@ -1,4 +1,7 @@
 #include "state_internal.h"
+#ifdef NBODY_BENCH_STEPS
+#include "step_timing.h"
+#endif
 
 /* Acceleration buffers swap roles each step; the arrays remain disjoint. */
 static void advance_state(size_t count, double dt,
@@ -17,13 +20,16 @@ static void advance_state(size_t count, double dt,
     }
 }
 
-void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
-                          AccelerationSolver solver, void *context)
+void simulate_euler_with_solver(Simulation *simulation, double dt, size_t steps,
+                                AccelerationSolver solver, void *context)
 {
     const size_t count = simulation->count;
     if (steps == 0 || count == 0) {
         return;
     }
+#ifdef NBODY_BENCH_STEPS
+    benchmark_step_boundary(0);
+#endif
     for (size_t step = 0; step < steps; ++step) {
         advance_state(count, dt, simulation->x, simulation->y, simulation->z,
                       simulation->vx, simulation->vy, simulation->vz,
@@ -43,5 +49,8 @@ void simulate_with_solver(Simulation *simulation, double dt, size_t steps,
         simulation->next_ax = previous_ax;
         simulation->next_ay = previous_ay;
         simulation->next_az = previous_az;
+#ifdef NBODY_BENCH_STEPS
+        benchmark_step_boundary(step + 1);
+#endif
     }
 }

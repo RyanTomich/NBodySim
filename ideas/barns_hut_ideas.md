@@ -1,7 +1,133 @@
-This document proposes performance experiments for the serial Barnes–Hut baseline
+# Barnes–Hut performance ideas
+
+## Merged implementation investigation — November 9, 2026
+
+The investigation of [aggregate-report.md](../results/native-barnes-hut-20261109T063122.798229Z/aggregate-report.md)
+focuses on size scaling and four-to-eight-thread scaling, excluding one-thread
+cases. The aim is one implementation that performs well across both body counts
+and thread counts. Isolated diagnostic builds used the report's saved inputs,
+compiler settings, theta 0.5, timestep 0.0001, and ten timesteps per sample.
+The findings below distinguish measured implementation costs from changes that
+trade accuracy for speed. Production source files were not changed by this
+investigation.
+
+### Eliminate false sharing between worker counters first
+
+In [src/barnes_hut.c](../src/barnes_hut.c), `BarnesHutWorker` occupies 32 bytes
+and adjacent workers repeatedly update `source_node_visits`,
+`direct_evaluations`, and `aggregate_evaluations` during traversal and force
+evaluation. These writes share cache lines, creating contention between
+otherwise independent threads. Increasing worker-record spacing to 128 bytes
+reduced the 20,000-body runtime from 25.21 to 22.70 ms/step at four threads and
+from 13.86 to 10.83 at eight threads. At 50,000 bodies, runtime fell from 69.98
+to 59.11 at four threads and from 42.57 to 31.51 at eight threads. Rushil measured
+24.78, 12.72, 74.45, and 38.61 ms/step respectively in the same diagnostic
+campaign. Final states remained exactly identical. Prefer thread-local counter
+accumulation followed by one publication per worker after the work loop;
+properly aligned and padded worker records are another remedy. This is the
+highest-priority fix because its benefit increases with thread count without
+changing the numerical algorithm.
+
+### Allow distant bucket leaves to contribute monopoles
+
+`collect_sources` stops immediately at a source leaf, and `evaluate_group`
+always evaluates every body in that leaf directly. Consequently, even a distant
+bucket containing several bodies cannot contribute a single monopole. Across
+the eleven force evaluations in a ten-step run, doubling the input from 10,000
+to 20,000 bodies increased direct contributions from approximately 68 million
+to 257 million, or 3.8 times. Distinguish accepted monopoles from direct source
+ranges in the interaction list, and apply the opening criterion to disjoint
+source leaves as well as internal nodes. Preserve self-exclusion and direct
+evaluation for overlapping or rejected leaves. With worker separation already
+applied, this experiment reduced the 20,000-body, eight-thread result from
+11.21 to 7.98 ms/step. It changes the approximation: sampled relative L2 force
+error increased from 0.107% to 0.158%, compared with Rushil's 0.292% for that
+case. Treat this as an accuracy/performance choice rather than an equivalent
+arithmetic optimization.
+
+### Add a guarded fast path for aggregate-force arithmetic
+
+`gravity_monopole_acceleration` computes distance with two nested `hypot`
+calls and then performs several divisions per accepted interaction. Rushil
+uses squared distance and one square root. Merged's aggregate contributions
+increase from approximately 19 million to 182 million between 10,000 and
+50,000 bodies, amplifying the cost of the robust arithmetic. With worker
+separation already applied, an experimental squared-distance kernel reduced
+the 50,000-body runtime from 59.31 to 47.51 ms/step at four threads and from
+32.26 to 26.31 at eight threads. Sampled accuracy was unchanged to rounding
+on these inputs. Implement a guarded ordinary-magnitude path using squared
+distance and retain the robust calculation for exceptional magnitudes. The
+unguarded diagnostic replacement is not a production-ready remedy: validate
+overflow, underflow, zero-distance behavior, and rounding before adopting it,
+and keep fast-math disabled.
+
+### Defer parallel tree construction and aggregation until profiles justify them
+
+Tree validation/building and mass aggregation together measured only about
+1–2% of whole-run runtime in these cases. Each profiled run built its tree once
+across eleven force evaluations, and no bounds or aggregate fallback occurred.
+Parallelizing these phases cannot explain or close the observed performance
+gap on this workload. Retain containment validation and refresh numerical
+summaries on every force call. Revisit parallel construction or aggregation
+after the force bottlenecks are reduced, or when longer trajectories and other
+distributions demonstrate a materially larger serial cost. The serial
+integration loops likewise should be prioritized from measured cost rather
+than simply because Rushil parallelizes them.
+
+### Treat scheduling changes as secondary experiments
+
+The merged force loop uses `schedule(dynamic, 1)` over all tree nodes, with
+internal-node iterations doing no target work. Increasing the chunk size to
+eight alone produced no consistent improvement: at 50,000 bodies and eight
+threads it measured 43.00 ms/step versus the baseline's 42.57. Combining chunk
+changes with worker separation must not obscure the benefit of removing false
+sharing. Fix worker storage first, then measure whether scheduling only leaves
+or grouping leaf work reduces overhead without introducing load imbalance.
+The leaf-only scheduling idea remains unmeasured in this investigation.
+
+### Select one implementation using matched accuracy and broader validation
+
+The experiments support retaining merged as the common implementation and
+addressing worker contention first, followed by aggregate arithmetic and
+unnecessary direct leaf work. Equal theta does not imply equal accuracy or
+interaction counts across merged and Rushil. Compare runtime at a shared error
+target before selecting approximation settings, and measure force errors on
+identical position snapshots as well as trajectory differences. Preserve the
+shared leapfrog contract, initial force evaluation, public/private boundaries,
+bounded subdivision, and allocation-free simulation call. Qualify numerical
+changes with behavioral regression tests and clean serial and OpenMP test
+builds, including one- and four-thread unit checks; these correctness checks
+do not make one-thread performance a selection criterion. Repeat performance
+comparisons with more samples, larger inputs, other seeds and distributions,
+and longer trajectories before treating these short experiments as a final
+ranking.
+
+### Evidence and limits of the diagnostic measurements
+
+The [first comparison](../results/merged-performance-investigation-20261109/summary.csv)
+used six measured samples per case in two shuffled batches, with an untimed
+warmup per batch. The [kernel and leaf experiments](../results/merged-performance-investigation-20261109/second-summary.csv)
+used five measured samples and one warmup per case. Runs were sequential, and
+every invocation passed the native driver's finite-state, unchanged-mass,
+repeatability, and sampled-force checks. Layout and scheduling variants in the
+first comparison also matched the report's saved final states exactly. See
+the [phase measurements](../results/merged-performance-investigation-20261109/phase-summary.csv)
+and [experiment metadata](../results/merged-performance-investigation-20261109/status.json)
+for details. These measurements establish useful optimization priorities but
+do not replace the original thirty-sample campaign or production regression
+qualification. Improvements from separate experiments are not necessarily
+additive.
+
+## Historical serial-baseline proposals
+
+The remaining text preserves earlier proposals for a superseded per-particle,
+Euler-based implementation. Its source names, serial scope, and benchmark
+commands are historical, not instructions for the current merged solver.
+
+This historical section proposes performance experiments for the serial Barnes–Hut baseline
 described below. First, investigate target traversal order and node metadata.
 Then use profiles to choose between arithmetic and tree construction experiments.
-These proposals are hypotheses based on the source. This document contains no
+These proposals are hypotheses based on the source. This historical section contains no
 measurements of additional speedups.
 
 The proposals concern the earlier per-particle traversal baseline of the solver

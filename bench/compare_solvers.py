@@ -1,182 +1,253 @@
 #!/usr/bin/env python3
-"""Benchmark all four registered solvers and parallel Barnes-Hut strong scaling.
-Uses the production build/bench timer and shared Euler or leapfrog integrator.
+"""Serial solver comparison or OpenMP scaling sweep.
+
+Each point averages three 20-step trajectories by default, resetting the saved
+initial state before each run. Error bars are sample SD across run averages.
 """
+
 import argparse
 import csv
-from datetime import datetime, timezone
+from contextlib import contextmanager
 import json
 import math
 import os
 from pathlib import Path
-import random
 import shutil
-import statistics
 import subprocess
 import sys
 
-from run import ROOT, read_state, trajectory_errors, timing_summary, write_csv
+import run as runner
+
+SOLVERS = ("n2", "serial-barnes-hut", "grouped-barnes-hut", "fmm")
+PARALLEL_SERIES = tuple(
+    (solver, threads) for solver in ("n2", *runner.BARNES_HUT_SOLVERS, "fmm")
+    for threads in ((1,) if solver == "serial-barnes-hut" else (1, 4, 8))
+)
 
 
-def execute(command, folder, env=None, stem='run'):
-    result = subprocess.run([str(x) for x in command], cwd=ROOT, env=env,
-                            capture_output=True, text=True)
-    (folder/(stem+'.stdout.log')).write_text(result.stdout)
-    (folder/(stem+'.stderr.log')).write_text(result.stderr)
-    if result.returncode:
-        raise RuntimeError(f'Command failed ({result.returncode}); see {folder}/{stem}.stderr.log')
-    return result.stdout, result.stderr
+def configurations(count, parallel):
+    series = PARALLEL_SERIES if parallel else tuple((solver, 1) for solver in SOLVERS)
+    return [(solver, threads) for solver, threads in series
+            if not (parallel and count > 50000 and solver == "n2" and threads != 8)]
 
 
-def metadata(stderr, prefix):
-    for line in stderr.splitlines():
-        if line.startswith(prefix+': '):
-            return json.loads(line[len(prefix)+2:])
+@contextmanager
+def thread_environment(threads):
+    settings = {"OMP_NUM_THREADS": str(threads), "OMP_DYNAMIC": "FALSE",
+                "OMP_THREAD_LIMIT": str(threads)}
+    previous = {key: os.environ.get(key) for key in settings}
+    os.environ.update(settings)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def check_threads(log, threads, parallel):
+    records = [json.loads(line.split(": ", 1)[1]) for line in log.splitlines()
+               if line.startswith("thread_check: ")]
+    if parallel:
+        expected = {"openmp": True, "requested_threads": threads, "effective_threads": threads}
+        if records != [expected]:
+            raise ValueError("Missing or mismatched OpenMP thread check")
+        return expected
+    if records:
+        raise ValueError("Expected a serial executable")
     return {}
 
 
-def main():
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--integrator',choices=['euler','leapfrog'],default='euler')
-    parser.add_argument('--bodies',type=int,nargs='+',default=[1000,4000,16000])
-    parser.add_argument('--threads',type=int,nargs='+',default=[1,2,4,8])
-    parser.add_argument('--samples',type=int,default=30)
-    parser.add_argument('--warmups',type=int,default=3)
-    parser.add_argument('--steps',type=int,default=20)
-    parser.add_argument('--dt',type=float,default=0.0001)
-    parser.add_argument('--theta',type=float,default=0.6)
-    parser.add_argument('--thetas',type=float,nargs='+',help='sweep Barnes-Hut theta values')
-    parser.add_argument('--barnes-hut-only',action='store_true',help='omit FMM from the comparison')
-    parser.add_argument('--order',type=int,default=4)
-    parser.add_argument('--seed',type=int,default=42)
-    args=parser.parse_args()
-    if (min(args.bodies)<2 or min(args.threads)<1 or args.samples<2 or args.warmups<0
-            or args.steps<2 or not math.isfinite(args.dt) or args.dt<=0
-            or not math.isfinite(args.theta) or args.theta<0 or args.order not in range(1,7)):
-        parser.error('invalid workload/settings; require at least two steps')
-    args.threads=sorted(set([1]+args.threads))
-    thetas=sorted(set(args.thetas if args.thetas is not None else [args.theta]))
-    if any(not math.isfinite(t) or t<0 for t in thetas):
-        parser.error('theta values must be finite and nonnegative')
-    stamp=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    out=ROOT/'results'/f"{'theta-sweep' if args.thetas is not None else 'four-solvers'}-{args.integrator}-{stamp}"
-    out.mkdir(parents=True)
-    status={'status':'running','settings':vars(args),'integrator':args.integrator,
-            'scope':'integration and full solver calls only; leapfrog includes its initial force evaluation',
-            'cpu_count':os.cpu_count(),'platform':os.uname().sysname,'machine':os.uname().machine,
-            'initialization':'generator uniform positions, equal total mass 1, v=0; direct n2 initial acceleration',
-            'reference':'n2 with identical initial state, dt and steps',
-            'thread_environment':{'OMP_DYNAMIC':'FALSE','OMP_PROC_BIND':'close','OMP_PLACES':'cores'}}
-    status_path=out/'status.json'
-    def save_status(): status_path.write_text(json.dumps(status,indent=2,allow_nan=False)+'\n')
-    save_status()
-    print(f'Results: {out}',flush=True)
-    rows=[]
+def summarize(durations, steps):
+    statistics = runner.timing_summary(durations, steps)
+    return {"mean_ms_per_step": 1000 * statistics["mean_seconds_per_step"],
+            "stddev_ms_per_step": 1000 * statistics["stddev_seconds_per_step"]}
+
+
+def build(directory, parallel=False):
+    target = "build/bench_steps_openmp" if parallel else "build/bench_steps"
+    option = "OPENMP=" + str(int(parallel))
+    if "NBODY_PROFILE_BH" in os.environ.get("CPPFLAGS", ""):
+        raise ValueError("Solver sweeps require phase profiling to be disabled")
+    with (directory / "build.stdout.log").open("w") as log:
+        for command in (["make", "--no-print-directory", "clean"],
+                        ["make", "--no-print-directory", option, "print-config"],
+                        ["make", "--no-print-directory", option, target]):
+            subprocess.run(command, cwd=runner.ROOT, stdout=log,
+                           stderr=subprocess.STDOUT, check=True)
+    binary = directory / "bench"
+    shutil.copy2(runner.ROOT / target, binary)
+    return binary
+
+
+def collect(binary, instance, case, solver, args, threads=1):
+    case.mkdir()
+    integrator = getattr(args, "integrator", "leapfrog")
+    status = {"status": "failed", "solver": solver, "threads": threads,
+              "steps": args.steps, "dt": args.dt, "samples": args.samples, "warmups": 0,
+              "integrator": integrator,
+              "started": runner.now()}
     try:
-        execute(['make','-B','all'],out,stem='build')
-        shutil.copy2(ROOT/'build/bench',out/'bench')
-        config,_=execute(['make','print-config'],out,stem='build-config')
-        status['build_config']=config
-        for count in args.bodies:
-            case=out/str(count); case.mkdir()
-            # Generator output stays in ignored bench/data; retain the actual input in results.
-            raw=ROOT/'bench/data'/f'instance-suite-n{count}-seed{args.seed}-{stamp}.txt'
-            execute([sys.executable,'generate_instance.py','--n',count,'--L',1,
-                     '--w-min',1/count,'--w-max',1/count,'--v-max',0,'--a-max',0,
-                     '--seed',args.seed,'--output',raw],case,stem='generate')
-            initial_text,_=execute([ROOT/'build/app','--solver','n2',raw,args.dt,1],case,stem='initialize')
-            initial=case/'input.txt'; initial.write_text(initial_text)
-            raw_state=read_state(raw); initial_state=read_state(initial)
-            assert [r[:7] for r in raw_state]==[r[:7] for r in initial_state]
-            configurations=[]
-            if not args.barnes_hut_only: configurations.append(('fmm',1,'order',args.order))
-            for opening in thetas:
-                configurations.append(('serial-barnes-hut',1,'theta',opening))
-                configurations += [('parallel-barnes-hut',t,'theta',opening) for t in args.threads]
-            random.Random(args.seed+count).shuffle(configurations)
-            configurations.insert(0,('n2',1,None,None))
-            reference=None; force_reference=None; parallel_references={}
-            for solver,threads,key,value in configurations:
-                folder=case/(f'{solver}-{threads}threads'+(f'-theta{value:g}' if key=='theta' else '')); folder.mkdir()
-                env=dict(os.environ,OMP_NUM_THREADS=str(threads),OMP_DYNAMIC='FALSE',
-                         OMP_PROC_BIND='close',OMP_PLACES='cores',NBODY_INTEGRATOR=args.integrator)
-                option=[] if key is None else [key,value]
-                samples_text,stderr=execute([out/'bench',initial,args.dt,args.steps,args.samples,
-                     args.warmups,'timing',folder/'final.txt',solver,*option],folder,env)
-                (folder/'samples.csv').write_text(samples_text)
-                samples=[float(r['seconds']) for r in csv.DictReader(samples_text.splitlines())]
-                if len(samples)!=args.samples or any(not math.isfinite(x) or x<=0 for x in samples):
-                    raise ValueError('Invalid timing samples')
-                final=read_state(folder/'final.txt')
-                if solver=='n2': reference=final
-                if solver=='parallel-barnes-hut':
-                    if value not in parallel_references: parallel_references[value]=final
-                    elif final!=parallel_references[value]: raise ValueError('Thread count changed final state')
-                errors=trajectory_errors(final,reference)
-                write_csv(folder/'trajectory-error.csv',list(errors[0]),errors)
-                # v=0 means first Euler drift leaves positions unchanged: compare forces at shared positions.
-                force_text,_=execute([ROOT/'build/app','--solver',solver,
-                    *([] if key is None else ['--'+key,value]),initial,args.dt,1],folder,env,stem='force')
-                force_file=folder/'force-state.txt'; force_file.write_text(force_text)
-                force_state=read_state(force_file)
-                assert [r[1:4] for r in force_state]==[r[1:4] for r in initial_state]
-                if solver=='n2': force_reference=force_state
-                force_error=trajectory_errors(force_state,force_reference)[2]
-                summary=timing_summary(samples,args.steps)
-                mean=summary['mean_seconds_per_step']*1000
-                row=dict(bodies=count,solver=solver,threads=threads,steps=args.steps,dt=args.dt,
-                         theta=value if key=='theta' else '',order=args.order if key=='order' else '',
-                         samples=args.samples,mean_ms_per_step=mean,
-                         stddev_ms_per_step=summary['stddev_seconds_per_step']*1000,
-                         force_relative_l2=force_error['relative_l2_error'],force_rms=force_error['rms_error'],
-                         position_rms=errors[0]['rms_error'],velocity_rms=errors[1]['rms_error'])
-                totals=metadata(stderr,'solver_totals')
-                if solver=='parallel-barnes-hut' and totals.get('actual_threads')!=threads:
-                    raise ValueError('OpenMP did not use the requested thread count')
-                rows.append(row)
-                details=dict(status='success',solver=solver,threads=threads,
-                             solver_config=metadata(stderr,'solver_config'),
-                             solver_totals=metadata(stderr,'solver_totals'),**summary)
-                (folder/'status.json').write_text(json.dumps(details,indent=2)+'\n')
-                write_csv(out/'comparison.csv',list(rows[0]),rows)
-                print(f'{count:6d} {solver:21s} threads={threads:2d} {key}={value}: {mean:9.4f} ms/step; '
-                      f'force rel.L2={row["force_relative_l2"]:.3g}; position RMS={row["position_rms"]:.3g}',flush=True)
-        scaling=[]
-        for count in args.bodies:
-            for opening in thetas:
-                group=[r for r in rows if r['bodies']==count and r['solver']=='parallel-barnes-hut' and r['theta']==opening]
-                baseline=next(r['mean_ms_per_step'] for r in group if r['threads']==1)
-                for r in sorted(group,key=lambda r:r['threads']):
-                    speedup=baseline/r['mean_ms_per_step']
-                    scaling.append(dict(bodies=count,theta=opening,threads=r['threads'],mean_ms_per_step=r['mean_ms_per_step'],
-                                        speedup_vs_1thread=speedup,parallel_efficiency=speedup/r['threads']))
-        write_csv(out/'scaling.csv',list(scaling[0]),scaling)
-        report=['# Solver comparison / theta sweep','',
-                f'Theta values {thetas} for both Barnes-Hut solvers; FMM order {args.order} (when included).',
-                f'{args.samples} samples, {args.warmups} warmups, {args.steps} {args.integrator} steps, dt={args.dt}.',
-                'Serial solvers use one thread. Only parallel Barnes-Hut uses multiple threads.',
-                'Leapfrog includes an initial force evaluation and then one per step; Euler uses supplied initial acceleration.',
-                'Timing includes integration and all tree/force work; excludes setup/reset/I/O.',
-                'Force error is measured at shared initial positions; trajectory error against direct n2.',
-                '', '| Bodies | Solver | Threads | Theta | ms/step | Force relative L2 | Position RMS |',
-                '|---|---|---|---|---|---|---|']
-        for r in sorted(rows,key=lambda r:(r['bodies'],r['solver'],str(r['theta']),r['threads'])):
-            report.append(f'| {r["bodies"]} | {r["solver"]} | {r["threads"]} | '
-                          f'{r["theta"]} | {r["mean_ms_per_step"]:.4f} | {r["force_relative_l2"]:.3g} | {r["position_rms"]:.3g} |')
-        report+=['','## Strong scaling','','| Bodies | Theta | Threads | Speedup vs 1 thread | Efficiency |',
-                 '|---|---|---|---|---|']
-        for r in scaling:
-            report.append(f'| {r["bodies"]} | {r["theta"]} | {r["threads"]} | {r["speedup_vs_1thread"]:.2f} | {r["parallel_efficiency"]:.1%} |')
-        report+=['','These results describe this uniform distribution and machine, not a universal ranking.',
-                 'Equal theta does not imply equal accuracy. Scaling may saturate or regress at higher thread counts.',
-                 'Workspace is prepared once and reused across warmups and samples, as in the existing benchmark driver.']
-        (out/'summary.md').write_text('\n'.join(report)+'\n')
-        status['status']='success'
-    except Exception as exc:
-        status.update(status='failed',error=str(exc)); raise
+        command = [binary, instance, str(args.dt), str(args.steps), str(args.samples), "0",
+                   "timing", case / "final.txt", solver]
+        if solver in runner.BARNES_HUT_SOLVERS:
+            command.extend(["theta", str(args.theta)])
+        elif solver == "fmm":
+            command.extend(["order", str(args.order)])
+        with thread_environment(threads):
+            result = runner.run_logged(command, case, stdout="samples.csv",
+                                       env={"NBODY_INTEGRATOR": integrator})
+        if result:
+            raise RuntimeError("Driver failed; see " + str(case / "stderr.log"))
+        with (case / "samples.csv").open(newline="") as source:
+            samples = list(csv.DictReader(source))
+        if [int(row["sample"]) for row in samples] != list(range(1, args.samples + 1)):
+            raise ValueError("Missing or duplicate whole-run samples")
+        durations = [float(row["seconds"]) for row in samples]
+        if any(not math.isfinite(value) or value <= 0 for value in durations):
+            raise ValueError("Expected finite positive whole-run timings; increase --steps if a duration is zero")
+        log = (case / "stderr.log").read_text()
+        status.update(check_threads(log, threads, getattr(args, "parallel", False)))
+        steps = [json.loads(line.split(": ", 1)[1])
+                 for line in log.splitlines()
+                 if line.startswith("step_timing: ")]
+        if [(row["sample"], row["step"]) for row in steps] != [
+                (sample, step) for sample in range(1, args.samples + 1)
+                for step in range(1, args.steps + 1)]:
+            raise ValueError("Missing or duplicate step timings")
+        for sample, seconds in enumerate(durations, 1):
+            values = [row["seconds"] for row in steps if row["sample"] == sample]
+            if (any(not math.isfinite(x) or x < 0 for x in values)
+                    or math.fsum(values) > seconds + 1e-9):
+                raise ValueError("Invalid individual-step timings")
+        summary = summarize(durations, args.steps)
+        final = runner.read_state(case / "final.txt")
+        runner.validate_bodies(final, runner.read_state(instance))
+        status["force_evaluations_per_run"] = runner.force_evaluations(integrator, args.steps, len(final))
+        runner.driver_metadata(case, status)
+        runner.write_csv(case / "steps.csv", ["sample", "step", "seconds"], steps)
+        status["status"] = "ok"
+        return summary, final
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        status["error"] = str(error)
+        raise
     finally:
-        save_status()
+        status["finished"] = runner.now()
+        runner.write_json(case / "status.json", status)
 
 
-if __name__=='__main__':
-    main()
+def experiment(args):
+    directory = runner.create_experiment_directory(args.results_dir)
+    suite = "parallel-sweep" if args.parallel else "solver-sweep"
+    max_speed = 0 if args.distribution == "clusters" else 3
+    integrator = getattr(args, "integrator", "leapfrog")
+    settings = {"bodies": args.bodies, "steps": args.steps, "dt": args.dt,
+                "integrator": integrator,
+                "theta": args.theta, "order": args.order,
+                "configurations": [{"bodies": count, "solver": solver, "threads": threads}
+                                   for count in args.bodies
+                                   for solver, threads in configurations(count, args.parallel)],
+                "threads": [1, 4, 8] if args.parallel else 1,
+                "samples": args.samples, "warmups": 0, "seed": args.seed,
+                "generator": {"distribution": args.distribution,
+                              "L": 10 if args.distribution == "uniform" else None,
+                              "w_min": 1, "w_max": 100, "v_max": max_speed, "a_max": 0}}
+    status = {"status": "running", "suite": suite, "settings": settings,
+              "started": runner.now(), "error_bars": "whole_run_sample_sd"}
+    runner.write_json(directory / "status.json", status)
+    rows = []
+    try:
+        binary = build(directory, args.parallel)
+        for count in args.bodies:
+            folder = directory / str(count)
+            folder.mkdir()
+            instance = folder / "input.txt"
+            command = [sys.executable, runner.ROOT / "generate_instance.py", "--n", str(count),
+                       "--distribution", args.distribution, "--L", "10",
+                       "--w-min", "1", "--w-max", "100", "--v-max", str(max_speed),
+                       "--a-max", "0", "--seed", str(args.seed), "--output", instance]
+            if runner.run_logged(command, folder, stdout="generation.stdout.log",
+                                 stderr="generation.stderr.log"):
+                raise RuntimeError("Input generation failed; see " + str(folder))
+            reference = None
+            for solver, threads in configurations(count, args.parallel):
+                print("N={} {}: {} runs × {} steps, {} threads".format(
+                    count, solver, args.samples, args.steps, threads), flush=True)
+                case = folder / ("{}-{}threads".format(solver, threads) if args.parallel else solver)
+                summary, final = collect(binary, instance, case, solver, args, threads)
+                if solver == "n2" and reference is None:
+                    reference = final
+                    reference_threads = threads
+                distribution = runner.save_distribution_errors(case, final, reference)
+                errors = runner.trajectory_errors(final, reference)
+                runner.write_csv(case / "error.csv", list(errors[0]), errors)
+                row = {"bodies": count, "solver": solver, "threads": threads, "steps": args.steps,
+                       "dt": args.dt, "samples": args.samples, "integrator": integrator,
+                       "force_evaluations_per_run": runner.force_evaluations(integrator, args.steps, count),
+                       "reference_threads": reference_threads,
+                       "theta": args.theta if solver in runner.BARNES_HUT_SOLVERS else None,
+                       "order": args.order if solver == "fmm" else None, **summary, **distribution}
+                if args.parallel:
+                    row.update(requested_threads=threads, effective_threads=threads)
+                for error in errors:
+                    row[error["field"] + "_relative_l2"] = error["relative_l2_error"]
+                    row[error["field"] + "_rms"] = error["rms_error"]
+                rows.append(row)
+                runner.write_csv(directory / (suite + ".csv"), list(rows[0]), rows)
+                print("  {:.6g} ms/step; run SD {:.3g} ms".format(
+                    row["mean_ms_per_step"], row["stddev_ms_per_step"]), flush=True)
+        status["status"] = "ok"
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError, KeyboardInterrupt) as error:
+        status.update(status="failed", error=str(error) or "Interrupted by user")
+        (directory / "error.txt").write_text(status["error"] + "\n")
+    status["finished"] = runner.now()
+    runner.write_json(directory / "status.json", status)
+    print("Results: {} ({})".format(directory, status["status"]), flush=True)
+    return 0 if status["status"] == "ok" else 1
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--parallel", action="store_true",
+                        help="compare OpenMP solvers at 1/4/8 threads and the serial baseline at 1")
+    parser.add_argument("--integrator", choices=runner.INTEGRATORS, default="leapfrog")
+    parser.add_argument("--bodies", nargs="+", type=int, help="body counts (parallel default extends through 100000)")
+    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--samples", type=int, default=3, help="full runs per configuration (at least two)")
+    parser.add_argument("--dt", type=float, default=0.0001)
+    parser.add_argument("--theta", type=float, default=0.5)
+    parser.add_argument("--order", type=int, choices=range(1, 7), default=4)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--distribution", choices=("uniform", "clusters"), default="uniform",
+                        help="initial positions; clusters start from rest")
+    parser.add_argument("--results-dir", type=Path)
+    args = parser.parse_args(argv)
+    if args.bodies is None:
+        args.bodies = [1000, 5000, 10000, 20000, 50000] + ([100000] if args.parallel else [])
+    if args.results_dir is None:
+        args.results_dir = runner.ROOT / "results" / ("parallel-sweep" if args.parallel else "solver-sweep")
+    if any(count <= 0 for count in args.bodies) or len(set(args.bodies)) != len(args.bodies):
+        parser.error("body counts must be positive and unique")
+    if args.samples < 2:
+        parser.error("at least two samples are required for between-run SD")
+    if args.steps < 2 or not math.isfinite(args.dt) or args.dt <= 0:
+        parser.error("at least two steps and a finite positive dt are required")
+    if not math.isfinite(args.theta) or args.theta < 0:
+        parser.error("theta must be finite and nonnegative")
+    args.bodies.sort()
+    return args
+
+
+def main():
+    args = parse_args()
+    try:
+        return experiment(args)
+    except (OSError, RuntimeError) as error:
+        print("Cannot create experiment: {}".format(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

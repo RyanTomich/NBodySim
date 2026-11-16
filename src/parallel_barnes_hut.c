@@ -4,6 +4,8 @@
 #include "solver_internal.h"
 #include "n2_internal.h"
 #include "parse.h"
+
+#ifdef _OPENMP
 #include <limits.h>
 #include <math.h>
 #include <omp.h>
@@ -261,3 +263,5 @@ const SolverDescriptor parallel_barnes_hut_solver = {
     .name = "parallel-barnes-hut", .acceleration = evaluate,
     .create = create, .destroy = destroy, .settings = settings, .diagnostics = diagnostics
 };
+
+#endif

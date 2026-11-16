@@ -31,9 +31,19 @@ printf '0\n' > build/cli-empty.txt
 cmp build/cli-empty.txt build/cli-output.txt
 
 printf '1\n1 1 2 3 4 5 6 2 4 6\n' > build/cli-one-body.txt
-printf '1\n1 2 3.25 4.5 4.5 6 7.5 0 0 0\n' > build/cli-expected.txt
+printf '1\n1 2 3.25 4.5 4 5 6 0 0 0\n' > build/cli-expected.txt
 ./build/app build/cli-one-body.txt 0.25 1 > build/cli-output.txt
 cmp build/cli-expected.txt build/cli-output.txt
+./build/app --integrator leapfrog build/cli-one-body.txt 0.25 1 > build/cli-output.txt
+cmp build/cli-expected.txt build/cli-output.txt
+printf '1\n1 2 3.25 4.5 4.5 6 7.5 0 0 0\n' > build/cli-expected.txt
+./build/app build/cli-one-body.txt 0.25 1 --integrator euler > build/cli-output.txt
+cmp build/cli-expected.txt build/cli-output.txt
+./build/app --integrator euler build/cli-one-body.txt 0.25 0 > build/cli-output.txt
+cmp build/cli-one-body.txt build/cli-output.txt
+expect_failure build/cli-one-body.txt 0.25 1 --integrator
+expect_failure --integrator unknown build/cli-one-body.txt 0.25 1
+expect_failure --integrator euler --integrator leapfrog build/cli-one-body.txt 0.25 1
 
 # Saved final states can be resumed without changing the result.
 ./build/app tests/data/two_body.txt 0.01 5 > build/cli-first.txt
@@ -42,7 +52,14 @@ cmp build/cli-expected.txt build/cli-output.txt
 cmp build/cli-resumed.txt build/cli-n2.txt
 
 # Each solver is selectable before or after positional arguments.
-for solver in n2 barnes-hut serial-barnes-hut parallel-barnes-hut fmm; do
+if ./build/bench --build-info | grep -q '"openmp": true'; then
+    parallel_solver=parallel-barnes-hut
+else
+    parallel_solver=
+    expect_failure --solver parallel-barnes-hut tests/data/two_body.txt 0.01 1
+    grep -q 'requires an OpenMP build' build/cli-error.txt
+fi
+for solver in n2 serial-barnes-hut ${parallel_solver:+"$parallel_solver"} grouped-barnes-hut fmm; do
     for steps in 0 1 2 3; do
         ./build/app tests/data/two_body.txt 0.01 "$steps" > build/cli-default.txt
         ./build/app --solver "$solver" tests/data/two_body.txt 0.01 "$steps" > build/cli-output.txt
@@ -53,35 +70,30 @@ for solver in n2 barnes-hut serial-barnes-hut parallel-barnes-hut fmm; do
 done
 expect_failure tests/data/two_body.txt 0.01 1 --solver
 expect_failure tests/data/two_body.txt 0.01 1 --solver unknown
-expect_failure tests/data/two_body.txt 0.01 1 --solver direct
-expect_failure --solver n2 tests/data/two_body.txt 0.01 1 --solver barnes-hut
+expect_failure --solver barnes-hut tests/data/two_body.txt 0.01 1
+expect_failure --solver n2 tests/data/two_body.txt 0.01 1 --solver grouped-barnes-hut
 
 # Theta is valid only for Barnes–Hut runs, including full opening at zero.
-for theta in 0 0.25 1; do
-    ./build/app --theta "$theta" tests/data/two_body.txt 0.01 2 --solver barnes-hut > build/cli-output.txt
-    ./build/app --solver barnes-hut --theta "$theta" tests/data/two_body.txt 0.01 2 > build/cli-default.txt
-    cmp build/cli-default.txt build/cli-output.txt
-done
-for theta in -1 nan inf 1e999 bad ''; do
-    expect_failure --solver barnes-hut --theta "$theta" tests/data/two_body.txt 0.01 1
+for solver in serial-barnes-hut ${parallel_solver:+"$parallel_solver"} grouped-barnes-hut; do
+    for theta in 0 0.25 1; do
+        ./build/app --theta "$theta" tests/data/two_body.txt 0.01 2 --solver "$solver" > build/cli-output.txt
+        ./build/app --solver "$solver" --theta "$theta" tests/data/two_body.txt 0.01 2 > build/cli-default.txt
+        cmp build/cli-default.txt build/cli-output.txt
+    done
+    for theta in -1 nan inf 1e999 bad ''; do
+        expect_failure --solver "$solver" --theta "$theta" tests/data/two_body.txt 0.01 1
+    done
 done
 expect_failure --theta 0.5 tests/data/two_body.txt 0.01 1
 expect_failure --solver n2 --theta 0 tests/data/two_body.txt 0.01 1
 expect_failure --solver n2 --order 4 tests/data/two_body.txt 0.01 1
-expect_failure --solver barnes-hut tests/data/two_body.txt 0.01 1 --theta
-expect_failure --solver barnes-hut --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
+expect_failure --solver grouped-barnes-hut tests/data/two_body.txt 0.01 1 --theta
+expect_failure --solver grouped-barnes-hut --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
 
-expect_failure --solver approximate tests/data/two_body.txt 0.01 0
 expect_failure --solver fmm --theta 0 tests/data/two_body.txt 0.01 0
-expect_failure --solver barnes-hut --order 4 tests/data/two_body.txt 0.01 0
+expect_failure --solver grouped-barnes-hut --order 4 tests/data/two_body.txt 0.01 0
 for order in 0 7 1.5; do
     expect_failure --solver fmm --order "$order" tests/data/two_body.txt 0.01 0
 done
-
-./build/app --solver barnes-hut tests/data/two_body.txt 0.01 3 > build/cli-alias.txt
-./build/app --solver serial-barnes-hut tests/data/two_body.txt 0.01 3 > build/cli-canonical.txt
-cmp build/cli-alias.txt build/cli-canonical.txt
-expect_failure --solver parallel-barnes-hut --theta nan tests/data/two_body.txt 0.01 1
-expect_failure --solver parallel-barnes-hut --order 4 tests/data/two_body.txt 0.01 1
 
 printf 'All CLI tests passed.\n'
