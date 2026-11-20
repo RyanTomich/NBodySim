@@ -94,8 +94,6 @@ def collect(binary, instance, case, solver, args, threads=1):
                    "timing", case / "final.txt", solver]
         if solver in runner.BARNES_HUT_SOLVERS:
             command.extend(["theta", str(args.theta)])
-        elif solver == "fmm":
-            command.extend(["order", str(args.order)])
         with thread_environment(threads):
             result = runner.run_logged(command, case, stdout="samples.csv",
                                        env={"NBODY_INTEGRATOR": integrator})
@@ -145,7 +143,7 @@ def experiment(args):
     integrator = getattr(args, "integrator", "leapfrog")
     settings = {"bodies": args.bodies, "steps": args.steps, "dt": args.dt,
                 "integrator": integrator,
-                "theta": args.theta, "order": args.order,
+                "theta": args.theta, "order": runner.FMM_ORDER,
                 "configurations": [{"bodies": count, "solver": solver, "threads": threads}
                                    for count in args.bodies
                                    for solver, threads in configurations(count, args.parallel)],
@@ -188,7 +186,7 @@ def experiment(args):
                        "force_evaluations_per_run": runner.force_evaluations(integrator, args.steps, count),
                        "reference_threads": reference_threads,
                        "theta": args.theta if solver in runner.BARNES_HUT_SOLVERS else None,
-                       "order": args.order if solver == "fmm" else None, **summary, **distribution}
+                       "order": runner.FMM_ORDER if solver == "fmm" else None, **summary, **distribution}
                 if args.parallel:
                     row.update(requested_threads=threads, effective_threads=threads)
                 for error in errors:
@@ -218,7 +216,6 @@ def parse_args(argv=None):
     parser.add_argument("--samples", type=int, default=3, help="full runs per configuration (at least two)")
     parser.add_argument("--dt", type=float, default=0.0001)
     parser.add_argument("--theta", type=float, default=0.5)
-    parser.add_argument("--order", type=int, choices=range(1, 7), default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--distribution", choices=("uniform", "clusters"), default="uniform",
                         help="initial positions; clusters start from rest")

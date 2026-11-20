@@ -21,8 +21,8 @@ make
 # Grouped Barnes–Hut with one shared tree walk per target leaf.
 ./build/app --solver grouped-barnes-hut --theta 0.5 tests/data/two_body.txt 0.01 100 > build/final-bh.txt
 
-# FMM: higher expansion orders retain more terms.
-./build/app --solver fmm --order 4 tests/data/two_body.txt 0.01 100 > build/final-fmm.txt
+# FMM uses fourth-order expansions.
+./build/app --solver fmm tests/data/two_body.txt 0.01 100 > build/final-fmm.txt
 
 # Forward Euler with the supplied initial accelerations.
 ./build/app --integrator euler tests/data/two_body.txt 0.01 100 > build/final-euler.txt
@@ -30,9 +30,8 @@ make
 
 The positional arguments are `INPUT DT STEPS`. The timestep must be positive and
 finite; steps must be a nonnegative integer. Barnes–Hut defaults to theta `0.5`
-and accepts finite values of zero or greater. FMM defaults to order `4` and
-accepts integers from `1` through `6`. Use `--theta` only with Barnes–Hut and
-`--order` only with FMM.
+and accepts finite values of zero or greater. Use `--theta` only with
+Barnes–Hut. FMM uses fourth-order expansions.
 
 | Barnes–Hut solver | Force evaluation |
 | --- | --- |
@@ -136,7 +135,7 @@ python3 bench/run.py timing bench/data/1000.txt \
 
 python3 bench/run.py timing bench/data/1000.txt \
   --dt 0.0001 --steps 10 --samples 30 \
-  --solver fmm --order 4 --compare-n2
+  --solver fmm --compare-n2
 ```
 
 Pass multiple input files or `bench/data/*.txt` to benchmark several instances.
@@ -330,7 +329,7 @@ python3 figures/plot.py results/solver-sweep/<run>/solver-sweep.csv
 The default sweep compares **Direct (`n2`), serial and grouped Barnes–Hut (theta 0.5), and FMM
 (order 4)** at **1,000, 5,000, 10,000, 20,000, and 50,000 bodies**, with `dt=0.0001`.
 Defaults are `--samples 3 --steps 20`, with no warmups. Override `--bodies`,
-`--samples` (at least two), `--steps` (at least two), `--dt`, `--theta`, `--order`,
+`--samples` (at least two), `--steps` (at least two), `--dt`, `--theta`,
 `--seed`, `--distribution`, `--integrator`, or `--results-dir` as needed. For a quick workflow check use
 `--bodies 16 32 --steps 3`. The runner cleans and builds a dedicated serial
 `build/bench_steps` executable; it inherits the compiler and LTO settings.
@@ -385,7 +384,7 @@ python3 bench/accuracy_tradeoff.py --bodies 128 --steps 2
 
 The default experiment uses one saved **1,000-body** uniform-cube instance,
 seed 42, `L=10`, masses 1–100, maximum speed 3, and initial acceleration zero.
-It compares grouped Barnes–Hut **theta = 0.2, 0.3, 0.5, 0.7** and FMM **orders 1–6**
+It compares grouped Barnes–Hut **theta = 0.2, 0.3, 0.5, 0.7** and **fourth-order FMM**
 against one shared, untimed direct (`n2`) reference. Every approximate configuration gets **three measured
 runs and one warmup**, with **dt=0.0001 and 500 steps** for trajectories
 (total simulated duration **0.05**).
@@ -620,7 +619,7 @@ simulation step. This repeats computation, but preserves uninterrupted solver
 behavior, including Barnes–Hut topology reuse within each replay. The script
 freezes copies of the executable and input, runs subprocesses sequentially with
 one OpenMP thread, and includes the initial and exact final states. It accepts
-`--solver NAME` with the same solver names as the app, `--theta` for Barnes–Hut, `--order` for FMM, and
+`--solver NAME` with the same solver names as the app, `--theta` for Barnes–Hut, and
 `--app PATH` for another prebuilt executable. `--dt` and `--steps` are required;
 `--every` defaults to 10. Empty inputs are rejected; zero steps captures the
 initial state only.
@@ -748,6 +747,14 @@ diagnostic counts the current topology's limited leaves on each evaluation,
 including reuse. If grouped tree bounds or mass summaries cannot be represented,
 the callback fills all acceleration outputs with `NaN`. A later call with valid
 data can recover.
+
+FMM builds the octree, accumulates multipole moments upward, traverses pairs of
+source and target cells, then propagates local expansions downward and evaluates
+them at each body. The pair traversal uses the full cell half-widths to decide
+when a multipole translation is safe and directly evaluates other leaf pairs.
+If the tree or expansion cannot be
+evaluated with finite arithmetic, FMM recomputes the forces with `n2` and
+records the event in `direct_fallbacks`.
 
 Gravity uses normalized units (`G = 1`). Leapfrog is second-order for smooth
 forces; it does not conserve energy exactly, and approximate tree forces do not

@@ -60,7 +60,6 @@ def parser():
             sub.add_argument("--solver", choices=SOLVERS, default="n2")
             config = sub.add_mutually_exclusive_group()
             config.add_argument("--theta", type=finite_float)
-            config.add_argument("--order", type=int, choices=range(1, 7))
             sub.add_argument("--dt", type=finite_float, required=True)
             sub.add_argument("--steps", type=nonnegative_int, required=True)
             sub.add_argument("--every", type=positive_int, default=10)
@@ -82,8 +81,6 @@ def validate_options(args):
             raise ValueError("dt must be positive and total simulation time must be finite")
         if args.theta is not None and (args.solver not in BARNES_HUT_SOLVERS or args.theta < 0):
             raise ValueError("--theta requires a Barnes–Hut solver and a nonnegative value")
-        if args.order is not None and args.solver != "fmm":
-            raise ValueError("--order requires fmm")
     if args.command != "capture" and (args.width % 2 or args.height % 2):
         raise ValueError("video width and height must be even for H.264")
 
@@ -181,8 +178,6 @@ def capture(args):
         command = [str(frozen_app), "--solver", args.solver]
         if args.theta is not None:
             command += ["--theta", str(args.theta)]
-        if args.order is not None:
-            command += ["--order", str(args.order)]
         with (output / "capture.stderr.log").open("x") as log:
             for index, step in enumerate(schedule[1:], 1):
                 print("Capture {}/{}: step {}".format(index + 1, len(schedule), step), flush=True)
@@ -208,7 +203,7 @@ def capture(args):
         metadata = {
             "version": 1, "capture": "faithful-replay", "solver": args.solver,
             "theta": (args.theta if args.theta is not None else 0.5) if args.solver in BARNES_HUT_SOLVERS else None,
-            "order": (args.order if args.order is not None else 4) if args.solver == "fmm" else None,
+            "order": 4 if args.solver == "fmm" else None,
             "dt": args.dt, "steps": args.steps, "every": args.every,
             "threads": 1, "input": str(source), "app": str(executable),
         }

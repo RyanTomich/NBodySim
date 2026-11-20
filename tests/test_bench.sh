@@ -73,7 +73,7 @@ assert names == expected + ["grouped-barnes-hut", "fmm"]
 for solver, integrator in [*((name, "leapfrog") for name in names), ("grouped-barnes-hut", "euler")]:
     calls = 3 if integrator == "leapfrog" else 2
     os.environ["NBODY_INTEGRATOR"] = "euler" if integrator == "leapfrog" else "leapfrog"
-    args = SimpleNamespace(solver=solver, theta=None, order=None, integrator=integrator,
+    args = SimpleNamespace(solver=solver, theta=None, integrator=integrator,
                            dt=0.0001, steps=2, samples=2, warmups=1)
     with TemporaryDirectory(dir="build") as temporary:
         folder = Path(temporary).resolve()
@@ -104,6 +104,10 @@ for solver, integrator in [*((name, "leapfrog") for name in names), ("grouped-ba
                 assert all(row["tree_builds"] == 0 for row in rows)
                 assert abs(sum(row["percent_of_total"] for row in summarize(rows, args.steps)) - 100) < 1e-9
             assert set(status["diagnostics"]) == expected
+        if solver == "fmm":
+            assert status["order"] == summary["order"] == 4
+            assert "direct_pair_cutoff" not in status
+            assert status["diagnostics"]["direct_fallbacks"] == 0
         assert runner["compare_n2"](binary, instance, folder, args)
         with (folder / "timing/distribution-error.csv").open() as source:
             distances = list(csv.DictReader(source))

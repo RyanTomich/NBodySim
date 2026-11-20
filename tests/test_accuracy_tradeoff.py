@@ -49,7 +49,7 @@ class TradeoffTests(unittest.TestCase):
         self.assertEqual(args.reference_threads, 1)
         self.assertEqual(args.distribution, "uniform")
         self.assertEqual(args.thetas, [0.2, 0.3, 0.5, 0.7])
-        self.assertEqual(len(tradeoff.configurations(args.thetas)), 10)
+        self.assertEqual(len(tradeoff.configurations(args.thetas)), 5)
         for argv in (["--samples", "1"], ["--dt", "nan"], ["--bodies", "0"],
                      ["--thetas", "0.1", "0.1"], ["--thetas", "inf"], ["--warmups", "-1"], ["--reference-threads", "0"]):
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -70,7 +70,7 @@ class TradeoffTests(unittest.TestCase):
         initial = runner.read_state(directory / "input.txt")
         self.assertTrue(all(row[4:] == [0] * 6 for row in initial))
         self.assertTrue(all(abs(abs(value) - 1) < 2 for row in initial for value in row[1:4]))
-        self.assertEqual(len(self.rows(directory / "accuracy-tradeoff.csv")), 10)
+        self.assertEqual(len(self.rows(directory / "accuracy-tradeoff.csv")), 5)
 
     def test_failed_experiment_retains_status(self):
         args = tradeoff.parse_args(["--results-dir", str(self.directory / "failed")])
@@ -84,7 +84,10 @@ class TradeoffTests(unittest.TestCase):
         status = json.loads((self.directory / "status.json").read_text())
         self.assertEqual(status["status"], "ok")
         rows = self.rows(self.directory / "accuracy-tradeoff.csv")
-        self.assertEqual(len(rows), 8)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(status["settings"]["orders"], [4])
+        self.assertEqual([(row["case"], row["order"]) for row in rows if row["solver"] == "fmm"],
+                         [("fmm-order-4", "4")])
         self.assertFalse((self.directory / "n2").exists())
         reference = json.loads((self.directory / "reference/status.json").read_text())
         self.assertEqual((reference["mode"], reference["samples"], reference["warmups"]),

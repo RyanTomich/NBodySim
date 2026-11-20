@@ -86,14 +86,10 @@ for solver in serial-barnes-hut ${parallel_solver:+"$parallel_solver"} grouped-b
 done
 expect_failure --theta 0.5 tests/data/two_body.txt 0.01 1
 expect_failure --solver n2 --theta 0 tests/data/two_body.txt 0.01 1
-expect_failure --solver n2 --order 4 tests/data/two_body.txt 0.01 1
 expect_failure --solver grouped-barnes-hut tests/data/two_body.txt 0.01 1 --theta
 expect_failure --solver grouped-barnes-hut --theta 0 --theta 1 tests/data/two_body.txt 0.01 1
 
 expect_failure --solver fmm --theta 0 tests/data/two_body.txt 0.01 0
-expect_failure --solver grouped-barnes-hut --order 4 tests/data/two_body.txt 0.01 0
-for order in 0 7 1.5; do
-    expect_failure --solver fmm --order "$order" tests/data/two_body.txt 0.01 0
-done
+expect_failure --solver fmm --order 4 tests/data/two_body.txt 0.01 0
 
 printf 'All CLI tests passed.\n'

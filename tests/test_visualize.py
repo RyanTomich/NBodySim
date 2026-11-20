@@ -55,12 +55,12 @@ class VisualizationTests(unittest.TestCase):
                 visual.parse_state(text)
 
     def test_option_validation(self):
-        for extra in (("--dt", "0"), ("--theta", "0.5"), ("--order", "4"),
+        for extra in (("--dt", "0"), ("--theta", "0.5"),
                       ("--solver", "grouped-barnes-hut", "--theta", "-1")):
             with self.subTest(extra=extra), self.assertRaises(ValueError):
                 visual.validate_options(self.options(*extra))
         for extra in (("--dt", "nan"), ("--steps", "-1"), ("--every", "0"),
-                      ("--solver", "fmm", "--order", "7")):
+                      ("--solver", "fmm", "--order", "4")):
             with self.subTest(extra=extra), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.options(*extra)
         args = visual.parser().parse_args(["render", "saved.npz", "--width", "101"])
@@ -132,14 +132,20 @@ class VisualizationTests(unittest.TestCase):
                 self.quiet_capture(self.options())
 
     def test_solver_parameters_are_forwarded(self):
-        for solver, flag, value in (("grouped-barnes-hut", "--theta", "0.3"), ("fmm", "--order", "6")):
-            args = self.options("--solver", solver, flag, value, "--steps", "1",
-                                "--output-dir", str(self.directory / solver))
-            result = subprocess.CompletedProcess([], 0, self.input.read_text(), "")
-            with patch.object(visual.subprocess, "run", return_value=result) as run:
-                path = self.quiet_capture(args)
-            self.assertEqual(run.call_args.args[0][1:5], ["--solver", solver, flag, value])
-            self.assertEqual(str(visual.load_trajectory(path)["metadata"][flag[2:]]), value)
+        args = self.options("--solver", "grouped-barnes-hut", "--theta", "0.3", "--steps", "1")
+        result = subprocess.CompletedProcess([], 0, self.input.read_text(), "")
+        with patch.object(visual.subprocess, "run", return_value=result) as run:
+            path = self.quiet_capture(args)
+        self.assertEqual(run.call_args.args[0][1:5], ["--solver", "grouped-barnes-hut", "--theta", "0.3"])
+        self.assertEqual(visual.load_trajectory(path)["metadata"]["theta"], 0.3)
+
+    def test_fmm_capture_records_fixed_order(self):
+        args = self.options("--solver", "fmm", "--steps", "1")
+        result = subprocess.CompletedProcess([], 0, self.input.read_text(), "")
+        with patch.object(visual.subprocess, "run", return_value=result) as run:
+            path = self.quiet_capture(args)
+        self.assertEqual(run.call_args.args[0][1:-3], ["--solver", "fmm"])
+        self.assertEqual(visual.load_trajectory(path)["metadata"]["order"], 4)
 
     def test_archive_validation_and_no_pickle(self):
         path = self.quiet_capture(self.options("--steps", "0"))

@@ -15,8 +15,7 @@ int main(int argc, char **argv)
     const char *positional[3];
     size_t positional_count = 0;
     const char *solver_name = "n2";
-    SolverOption options[2];
-    size_t option_count = 0;
+    SolverOption theta = {"theta", NULL};
     bool solver_set = false;
     const char *integrator_name = NULL;
     for (int i = 1; i < argc; ++i) {
@@ -33,13 +32,12 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             integrator_name = argv[i];
-        } else if (strcmp(argv[i], "--theta") == 0 || strcmp(argv[i], "--order") == 0) {
-            const char *name = argv[i] + 2;
-            if (++i == argc || option_count == 2) {
-                fprintf(stderr, "Invalid solver options.\n");
+        } else if (strcmp(argv[i], "--theta") == 0) {
+            if (theta.value || ++i == argc) {
+                fprintf(stderr, "Expected --theta VALUE once.\n");
                 return EXIT_FAILURE;
             }
-            options[option_count++] = (SolverOption){name, argv[i]};
+            theta.value = argv[i];
         } else if (positional_count < 3) {
             positional[positional_count++] = argv[i];
         } else {
@@ -48,7 +46,7 @@ int main(int argc, char **argv)
         }
     }
     if (positional_count != 3) {
-        fprintf(stderr, "Usage: %s [--solver NAME] [--integrator leapfrog|euler] [--theta VALUE | --order P] INPUT DT STEPS\n",
+        fprintf(stderr, "Usage: %s [--solver NAME] [--integrator leapfrog|euler] [--theta VALUE] INPUT DT STEPS\n",
                 argv[0]);
         fputs("Solvers:", stderr);
         for (size_t i = 0; i < solver_count(); ++i) {
@@ -84,7 +82,7 @@ int main(int argc, char **argv)
     Solver solver;
     const char *error;
     if (!solver_create(&solver, solver_name, simulation_view(simulation).count,
-                       options, option_count, &error)) {
+                       &theta, theta.value != NULL, &error)) {
         fprintf(stderr, "%s\n", error);
         simulation_destroy(simulation);
         return EXIT_FAILURE;

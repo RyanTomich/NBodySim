@@ -27,7 +27,7 @@ class SolverSweepTests(unittest.TestCase):
         self.assertEqual(args.bodies, [1000, 5000, 10000, 20000, 50000])
         self.assertEqual(args.steps, 20)
         self.assertEqual(args.samples, 3)
-        self.assertEqual((args.theta, args.order), (0.5, 4))
+        self.assertEqual(args.theta, 0.5)
         self.assertEqual(args.distribution, "uniform")
 
     def test_cluster_sweep_saves_distribution_and_rest_state(self):
@@ -197,7 +197,7 @@ class SolverSweepTests(unittest.TestCase):
                             "--L", "10", "--w-min", "1", "--w-max", "100", "--v-max", "3",
                             "--a-max", "0", "--seed", "42", "--output", str(instance)],
                            capture_output=True, check=True)
-            args = SimpleNamespace(dt=0.0001, steps=3, theta=0.5, order=4,
+            args = SimpleNamespace(dt=0.0001, steps=3, theta=0.5,
                                    parallel=parallel, samples=3, integrator=integrator)
             rows = []
             reference = None

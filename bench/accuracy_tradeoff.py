@@ -15,14 +15,13 @@ import run as runner
 
 
 def configurations(thetas):
-    return ([("grouped-barnes-hut", theta, None) for theta in thetas]
-            + [("fmm", None, order) for order in range(1, 7)])
+    return [("grouped-barnes-hut", theta) for theta in thetas] + [("fmm", None)]
 
 
-def case_name(solver, theta, order):
+def case_name(solver, theta):
     if solver == "grouped-barnes-hut":
         return "grouped-barnes-hut-theta-" + str(theta)
-    return "fmm-order-" + str(order) if solver == "fmm" else "n2"
+    return f"fmm-order-{runner.FMM_ORDER}"
 
 
 def build(directory, openmp=False):
@@ -93,7 +92,7 @@ def experiment(args):
     settings = {key: getattr(args, key) for key in
                 ("bodies", "dt", "steps", "samples", "warmups", "seed", "thetas",
                  "reference_threads", "integrator")}
-    settings.update(threads=1, openmp=False, orders=list(range(1, 7)),
+    settings.update(threads=1, openmp=False, orders=[runner.FMM_ORDER],
                     generator={"distribution": args.distribution,
                                "L": 10 if args.distribution == "uniform" else None,
                                "w_min": 1, "w_max": 100, "v_max": max_speed, "a_max": 0})
@@ -116,12 +115,12 @@ def experiment(args):
         print("N={}: n2 reference (one untimed run, {} thread(s))".format(
             args.bodies, args.reference_threads), flush=True)
         trajectory_reference = collect_reference(reference_binary, instance, directory / "reference", args)
-        for solver, theta, order in configurations(args.thetas):
-            name = case_name(solver, theta, order)
+        for solver, theta in configurations(args.thetas):
+            name = case_name(solver, theta)
             print("N={}: {} ({} measured runs)".format(args.bodies, name, args.samples), flush=True)
             case = directory / name
             case.mkdir()
-            options = argparse.Namespace(**vars(args), solver=solver, theta=theta, order=order)
+            options = argparse.Namespace(**vars(args), solver=solver, theta=theta)
             timing_status, timing_summary = runner.collect_timing(binary, instance, case / "timing", options)
             if timing_status["status"] != "ok":
                 raise RuntimeError(timing_status["error"])
@@ -134,7 +133,7 @@ def experiment(args):
             row = {"case": name, "bodies": args.bodies, "solver": solver, "theta": theta,
                    "integrator": args.integrator,
                    "force_evaluations_per_run": timing_status["force_evaluations_per_run"],
-                   "order": order, "threads": 1, "dt": args.dt, "steps": args.steps,
+                   "order": timing_summary["order"], "threads": 1, "dt": args.dt, "steps": args.steps,
                    "samples": args.samples, "warmups": args.warmups,
                    "mean_seconds_per_step": timing_summary["mean_seconds_per_step"],
                    "stddev_seconds_per_step": timing_summary["stddev_seconds_per_step"],

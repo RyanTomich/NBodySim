@@ -1,40 +1,33 @@
 #ifndef LAPLACE_INTERNAL_H
 #define LAPLACE_INTERNAL_H
 
-#include <stddef.h>
+enum { LAPLACE_ORDER = 4, LAPLACE_TERMS = 35, LAPLACE_SPLITS = 210 };
 
-enum { CARTESIAN_MAX_ORDER = 6, CARTESIAN_MAX_TERMS = 84, CARTESIAN_MAX_SPLITS = 924 };
-
-/* Each split represents a=b+c with factor choose(a,b), componentwise.
- * 84 = choose(6+3,3) terms and 924 = choose(6+6,6) splits. */
 typedef struct {
-    int a, b, c, factor;
+    int exponent[3];
+    int lower[3]; /* Index after lowering the axis exponent, or -1 if zero. */
+} CartesianTerm;
+
+/* Multi-indices satisfy a = b + c, with factor choose(a,b) componentwise.
+ * For an upward or downward shift, a is the parent term, b the child term,
+ * and c the center-offset monomial. The divisor rescales b for the child.
+ * In translation, a indexes the kernel, b the target local, and c the source moment. */
+typedef struct {
+    int a, b, c, factor, child_divisor;
 } CartesianSplit;
 
-/* Polynomial bookkeeping only; no particle properties or spatial kernel. */
-typedef struct {
-    size_t order;
-    int terms, splits;
-    int degree[CARTESIAN_MAX_TERMS];
-    int exponent[CARTESIAN_MAX_TERMS][3], lower[CARTESIAN_MAX_TERMS][3];
-    CartesianSplit split[CARTESIAN_MAX_SPLITS];
-} CartesianTerms;
-
-/* Prepare a zero-initialized table whose order is already set to 1..6.
- * The caller validates the order. No allocation occurs. */
-void laplace_prepare_terms(CartesianTerms *terms);
+extern const CartesianTerm laplace_terms[LAPLACE_TERMS];
+extern const CartesianSplit laplace_splits[LAPLACE_SPLITS];
 
 /* Add a positive 1/r source expansion to a target's local polynomial.
  * Moments and locals use coordinates scaled by their cell half-widths.
  * unit is the source-to-target center displacement divided by distance;
  * distance must be positive and finite, with well-separated source/target cells.
- * Prepared tables truncate combined source/target degree at order (1..6).
- * kernel is reusable scratch of terms->terms doubles. All arrays are disjoint;
- * local is accumulated, kernel is overwritten, and no allocation occurs.
+ * The translation truncates combined source/target degree at four.
+ * All arrays are disjoint. The function accumulates into local without allocating.
  */
-void laplace_translate(const CartesianTerms *terms, const double *moments,
+void laplace_translate(const double *moments,
                        double source_half_width, double target_half_width,
-                       const double unit[3], double distance, double *kernel,
-                       double *local);
+                       const double unit[3], double distance, double *local);
 
 #endif

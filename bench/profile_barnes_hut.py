@@ -277,7 +277,7 @@ def main():
             or (args.serial and args.threads != [1])):
         parser.error("threads must be unique positive counts; --serial requires --threads 1")
     args.threads.sort()
-    args.solver, args.order = "grouped-barnes-hut", None
+    args.solver = "grouped-barnes-hut"
     raise SystemExit(experiment(args))
 
 

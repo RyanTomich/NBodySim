@@ -22,6 +22,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 INTEGRATORS = ("leapfrog", "euler")
 BARNES_HUT_SOLVERS = ("serial-barnes-hut", "parallel-barnes-hut", "grouped-barnes-hut")
+FMM_ORDER = 4
 
 
 def now():
@@ -214,15 +215,13 @@ def compare_n2(binary, instance, folder, args):
     return comparison["status"] == "ok"
 
 
-def solver_settings(binary, instance, solver, theta, order=None):
+def solver_settings(binary, instance, solver, theta):
     """Ask the measured executable for its effective configuration, unmeasured."""
     with instance.open() as source:
         first = next((line.split()[0] for line in source if line.split()), "")
     command = [str(binary), "--metadata", solver, first]
     if theta is not None:
         command.extend(["theta", str(theta)])
-    if order is not None:
-        command.extend(["order", str(order)])
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Could not resolve solver settings")
@@ -249,14 +248,12 @@ def collect_timing(binary, instance, directory, args):
     summary = None
     theta = args.theta
     try:
-        status.update(solver_settings(binary, instance, args.solver, theta, args.order))
+        status.update(solver_settings(binary, instance, args.solver, theta))
         theta = status.get("theta")
         driver = [binary, instance, str(args.dt), str(args.steps), str(args.samples),
                   str(args.warmups), "timing", directory / "final.txt", args.solver]
         if theta is not None:
             driver.extend(["theta", str(theta)])
-        if "order" in status:
-            driver.extend(["order", str(status["order"])])
 
         if run_logged(driver, directory, stdout="samples.csv",
                       env={"NBODY_INTEGRATOR": integrator}):
@@ -365,7 +362,6 @@ def parse_args(argv=None):
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--solver", default="n2")
     parser.add_argument("--integrator", choices=INTEGRATORS, default="leapfrog")
-    parser.add_argument("--order", help="FMM expansion order (1 through 6)")
     parser.add_argument("--theta", type=float,
                         help="solver opening parameter (default supplied by the solver)")
     parser.add_argument("--compare-n2", action="store_true",
@@ -373,8 +369,6 @@ def parse_args(argv=None):
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results",
                         help="parent directory for automatically named experiments (default: results/)")
     args = parser.parse_args(argv)
-    if args.theta is not None and args.order is not None:
-        parser.error("--theta and --order apply to different solvers")
     if args.theta is not None:
         if not math.isfinite(args.theta) or args.theta < 0:
             parser.error("--theta must be finite and nonnegative")

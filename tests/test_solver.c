@@ -226,23 +226,6 @@ static void test_registered_solver_contract(void)
     }
 }
 
-static void test_fmm_cutoff_settings(void)
-{
-    /* The default and explicit order four select the same optimization. */
-    const char *orders[] = {NULL, "1", "2", "3", "4", "5", "6"};
-    for (size_t i = 0; i < sizeof(orders) / sizeof(orders[0]); ++i) {
-        Solver solver;
-        const char *error;
-        SolverOption order = {"order", orders[i]};
-        assert(solver_create(&solver, "fmm", 1, &order, orders[i] ? 1 : 0, &error));
-        MetadataCheck cutoff = {.name = "direct_pair_cutoff"};
-        solver_settings(&solver, find_metadata, &cutoff);
-        assert(cutoff.found && cutoff.value.type == METADATA_SIZE);
-        assert(cutoff.value.value.size == (i == 0 || i == 4 ? 192u : 0u));
-        solver_destroy(&solver);
-    }
-}
-
 static void fill_distant_groups(ReferenceBody *bodies)
 {
     /* Bodies at the same site exert zero acceleration on each other.
@@ -335,6 +318,32 @@ static void test_fmm_distant_groups(void)
     solver_destroy(&solver);
 }
 
+static void test_fmm_approximates_separated_groups(void)
+{
+    enum { GROUP_SIZE = 64, COUNT = 2 * GROUP_SIZE };
+    ReferenceBody bodies[COUNT];
+    for (size_t i = 0; i < COUNT; ++i) {
+        bodies[i] = (ReferenceBody){1, {i < GROUP_SIZE ? -16 : 16, 0, 0}, {0}, {0}};
+    }
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "fmm", COUNT, NULL, 0, &error));
+    Simulation *state = from_bodies(bodies, COUNT);
+    SimulationView view = simulation_view(state);
+    double ax[COUNT], ay[COUNT], az[COUNT];
+    solver.acceleration(&view, ax, ay, az, solver.context);
+
+    /* Coincident bodies contribute zero. The other group's field is
+     * approximated, so the error should exceed direct-sum rounding. */
+    const double direct_x = GROUP_SIZE / (32.0 * 32.0);
+    for (size_t i = 0; i < GROUP_SIZE; ++i) {
+        double difference = fabs(ax[i] - direct_x);
+        assert(difference > 1e-6 && difference < 1e-3);
+    }
+    simulation_destroy(state);
+    solver_destroy(&solver);
+}
+
 static void test_fmm_sparse_cells(void)
 {
     /* Two unevenly populated lines extend along different axes. Treating a
@@ -352,49 +361,50 @@ static void test_fmm_sparse_cells(void)
     solver_destroy(&solver);
 }
 
-static void test_fmm_order_contract(void)
+static void test_fmm_fixed_order(void)
 {
-    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
     ReferenceBody bodies[CLOUD_SIZE];
     fill_cloud(bodies);
-    for (size_t order = 0; order < sizeof(orders) / sizeof(orders[0]); ++order) {
-        for (size_t count = 0; count <= 3; ++count) {
-            Solver solver;
-            const char *error;
-            SolverOption option = {"order", orders[order]};
-            assert(solver_create(&solver, "fmm", count, &option, 1, &error));
-            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
-            solver_destroy(&solver);
-        }
+    Solver solver;
+    const char *error;
+    const SolverOption order = {"order", "4"};
+    assert(!solver_create(&solver, "fmm", 1, &order, 1, &error));
+    for (size_t count = 0; count <= 3; ++count) {
+        assert(solver_create(&solver, "fmm", count, NULL, 0, &error));
+        MetadataCheck metadata = {.name = "order"};
+        solver_settings(&solver, find_metadata, &metadata);
+        assert(metadata.found && metadata.value.type == METADATA_SIZE);
+        assert(metadata.value.value.size == 4);
+        simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+        solver_destroy(&solver);
     }
 }
 
 static void test_tree_summary_reuse(void)
 {
-    /* These fixed fixtures exercise approximations, including order four's
-     * larger leaves. Budgets are fixture-specific, not general error bounds. */
-    const char *orders[] = {NULL, "1", "2", "3", "4", "5", "6"};
-    for (size_t variant = 0; variant < sizeof(orders) / sizeof(orders[0]); ++variant) {
+    /* Use fixture-specific error budgets when reusing prepared workspace. */
+    const char *names[] = {"grouped-barnes-hut", "fmm"};
+    for (size_t variant = 0; variant < sizeof(names) / sizeof(names[0]); ++variant) {
         ReferenceBody bodies[CLOUD_SIZE];
         bool fmm = variant != 0;
-        if (variant == 4) {
+        if (fmm) {
             fill_distant_groups(bodies);
         } else {
             fill_cloud(bodies);
         }
-        double tolerance = variant == 4 ? 0.01 : 0.001;
+        double tolerance = fmm ? 0.01 : 0.001;
         Solver solver;
         const char *error;
-        SolverOption option = {"order", orders[variant]};
-        assert(solver_create(&solver, fmm ? "fmm" : "grouped-barnes-hut", CLOUD_SIZE,
-                             &option, fmm ? 1 : 0, &error));
+        assert(solver_create(&solver, names[variant], CLOUD_SIZE, NULL, 0, &error));
         Simulation *previous = check_force(&solver, bodies, CLOUD_SIZE, tolerance);
         ReferenceBody before[CLOUD_SIZE];
         memcpy(before, bodies, sizeof(before));
-        MetadataCheck approximations = {.name = fmm ? "translations" : "aggregate_evaluations"};
-        solver_diagnostics(&solver, find_metadata, &approximations);
-        assert(approximations.found && approximations.value.type == METADATA_SIZE);
-        assert(approximations.value.value.size > 0);
+        if (!fmm) {
+            MetadataCheck approximations = {.name = "aggregate_evaluations"};
+            solver_diagnostics(&solver, find_metadata, &approximations);
+            assert(approximations.found && approximations.value.type == METADATA_SIZE);
+            assert(approximations.value.value.size > 0);
+        }
 
         /* Rotate and translate the geometry, and change the source strengths.
          * Keep the old allocation alive to catch retained input pointers. */
@@ -409,8 +419,8 @@ static void test_tree_summary_reuse(void)
         }
         simulation_destroy(previous);
         if (fmm) {
-            /* Collapse and restore the cloud so rebuilt trees require very
-             * different occupied extents in the same prepared storage. */
+            /* Collapse and restore the cloud to exercise different trees in
+             * the same prepared storage. */
             for (size_t i = 0; i < CLOUD_SIZE; ++i) {
                 bodies[i].position = (Vec3){0};
             }
@@ -500,70 +510,66 @@ static void test_fmm_thread_consistency(void)
     const struct { size_t count; int distribution; } cases[] = {
         {1023, 0}, {1024, 0}, {COUNT, 0}, {COUNT, 1}, {COUNT, 2}, {COUNT, 3}
     };
-    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
     int saved_threads = omp_get_max_threads(), saved_dynamic = omp_get_dynamic();
     omp_set_dynamic(0);
     for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
         size_t count = cases[c].count;
-        for (size_t order = 0; order < 6; ++order) {
-            ReferenceBody bodies[COUNT];
-            for (size_t i = 0; i < count; ++i) {
-                Vec3 point = {(double)(i % 13) - 6, (double)(i / 13 % 13) - 6,
-                              (double)(i / 169) - 4};
-                if (cases[c].distribution == 1) {
-                    double offset = i < count * 9 / 10 ? -20 : 20;
-                    point = (Vec3){offset + point.x * 0.1, point.y * 0.1, point.z * 0.1};
-                } else if (cases[c].distribution == 2) {
-                    point = (Vec3){0.125 * (double)i, i % 2 ? -10 : 10, 0};
-                } else if (cases[c].distribution == 3) {
-                    point = (Vec3){0, 0, 0};
-                }
-                bodies[i] = (ReferenceBody){1 + (double)(i % 3), point, {0.01, 0, 0}, {0}};
+        ReferenceBody bodies[COUNT];
+        for (size_t i = 0; i < count; ++i) {
+            Vec3 point = {(double)(i % 13) - 6, (double)(i / 13 % 13) - 6,
+                          (double)(i / 169) - 4};
+            if (cases[c].distribution == 1) {
+                double offset = i < count * 9 / 10 ? -20 : 20;
+                point = (Vec3){offset + point.x * 0.1, point.y * 0.1, point.z * 0.1};
+            } else if (cases[c].distribution == 2) {
+                point = (Vec3){0.125 * (double)i, i % 2 ? -10 : 10, 0};
+            } else if (cases[c].distribution == 3) {
+                point = (Vec3){0, 0, 0};
             }
-            Solver solver;
-            SolverOption option = {"order", orders[order]};
-            const char *error;
-            /* FMM reads the runtime team setting on each evaluation. */
-            omp_set_num_threads(1);
-            assert(solver_create(&solver, "fmm", count, &option, 1, &error));
-            for (size_t run = 0; run < 2; ++run) {
-                Vec3 expected[COUNT];
-                reference_accelerations(bodies, count, expected);
-                Simulation *states[2];
-                double actual[2][3][COUNT];
-                for (size_t team = 0; team < 2; ++team) {
-                    omp_set_num_threads(team ? 4 : 1);
-                    states[team] = from_bodies(bodies, count);
-                    SimulationView view = simulation_view(states[team]);
-                    solver.acceleration(&view, actual[team][0], actual[team][1], actual[team][2],
-                                        solver.context);
-                    for (size_t i = 0; i < count; ++i) {
-                        assert_body(body_at(states[team], i), bodies[i], 0);
-                    }
-                    simulate_with_solver(states[team], 0.00001, 2, solver.acceleration, solver.context);
-                }
-                double error_norm = 0, reference_norm = 0;
-                for (size_t i = 0; i < count; ++i) {
-                    for (size_t axis = 0; axis < 3; ++axis) {
-                        assert_close(actual[1][axis][i], actual[0][axis][i], 0);
-                    }
-                    error_norm = hypot(error_norm, hypot(hypot(actual[0][0][i] - expected[i].x,
-                                      actual[0][1][i] - expected[i].y), actual[0][2][i] - expected[i].z));
-                    reference_norm = hypot(reference_norm, hypot(hypot(expected[i].x, expected[i].y),
-                                                                 expected[i].z));
-                    assert_body(body_at(states[0], i), body_at(states[1], i), 0);
-                    /* Reuse the solver with a new allocation, masses, and positions. */
-                    bodies[i].w *= 1.25;
-                    bodies[i].position.x *= 1.1;
-                    bodies[i].position.y += 0.25;
-                }
-                /* Fixture-specific accuracy budget, including order one. */
-                assert_close(error_norm, 0, 0.1 * (1 + reference_norm));
-                simulation_destroy(states[0]);
-                simulation_destroy(states[1]);
-            }
-            solver_destroy(&solver);
+            bodies[i] = (ReferenceBody){1 + (double)(i % 3), point, {0.01, 0, 0}, {0}};
         }
+        Solver solver;
+        const char *error;
+        /* FMM reads the runtime team setting on each evaluation. */
+        omp_set_num_threads(1);
+        assert(solver_create(&solver, "fmm", count, NULL, 0, &error));
+        for (size_t run = 0; run < 2; ++run) {
+            Vec3 expected[COUNT];
+            reference_accelerations(bodies, count, expected);
+            Simulation *states[2];
+            double actual[2][3][COUNT];
+            for (size_t team = 0; team < 2; ++team) {
+                omp_set_num_threads(team ? 4 : 1);
+                states[team] = from_bodies(bodies, count);
+                SimulationView view = simulation_view(states[team]);
+                solver.acceleration(&view, actual[team][0], actual[team][1], actual[team][2],
+                                    solver.context);
+                for (size_t i = 0; i < count; ++i) {
+                    assert_body(body_at(states[team], i), bodies[i], 0);
+                }
+                simulate_with_solver(states[team], 0.00001, 2, solver.acceleration, solver.context);
+            }
+            double error_norm = 0, reference_norm = 0;
+            for (size_t i = 0; i < count; ++i) {
+                for (size_t axis = 0; axis < 3; ++axis) {
+                    assert_close(actual[1][axis][i], actual[0][axis][i], 0);
+                }
+                error_norm = hypot(error_norm, hypot(hypot(actual[0][0][i] - expected[i].x,
+                                  actual[0][1][i] - expected[i].y), actual[0][2][i] - expected[i].z));
+                reference_norm = hypot(reference_norm, hypot(hypot(expected[i].x, expected[i].y),
+                                                             expected[i].z));
+                assert_body(body_at(states[0], i), body_at(states[1], i), 0);
+                /* Reuse the solver with a new allocation, masses, and positions. */
+                bodies[i].w *= 1.25;
+                bodies[i].position.x *= 1.1;
+                bodies[i].position.y += 0.25;
+            }
+            /* Fixture-specific accuracy budget. */
+            assert_close(error_norm, 0, 0.1 * (1 + reference_norm));
+            simulation_destroy(states[0]);
+            simulation_destroy(states[1]);
+        }
+        solver_destroy(&solver);
     }
     omp_set_num_threads(saved_threads);
     omp_set_dynamic(saved_dynamic);
@@ -576,51 +582,47 @@ static void test_fmm_parallel_fallback(void)
     int saved_threads = omp_get_max_threads(), saved_dynamic = omp_get_dynamic();
     omp_set_dynamic(0);
     omp_set_num_threads(4);
-    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
-    for (size_t order = 0; order < 6; ++order) {
-        Solver solver;
-        SolverOption option = {"order", orders[order]};
-        const char *error;
-        assert(solver_create(&solver, "fmm", COUNT, &option, 1, &error));
-        for (size_t run = 0; run < 2; ++run) {
-            /* Finite tree summaries, but overflowing distances between opposite
-             * corners fail during interactions. The next call must recover. */
-            double scale = run ? 1 : 8e307;
+    Solver solver;
+    const char *error;
+    assert(solver_create(&solver, "fmm", COUNT, NULL, 0, &error));
+    for (size_t run = 0; run < 2; ++run) {
+        /* Finite tree summaries, but overflowing distances between opposite
+         * corners fail during interactions. The next call must recover. */
+        double scale = run ? 1 : 8e307;
+        for (size_t i = 0; i < COUNT; ++i) {
+            bodies[i] = (ReferenceBody){1, {i & 1 ? scale : -scale,
+                                            i & 2 ? scale : -scale,
+                                            i & 4 ? scale : -scale}, {0}, {0}};
+        }
+        Simulation *state = from_bodies(bodies, COUNT);
+        SimulationView view = simulation_view(state);
+        double actual[3][COUNT], expected[3][COUNT];
+        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+        omp_set_num_threads(1);
+        /* Failed calls match direct summation; recovery matches a fresh
+         * serial FMM, including its approximation error. */
+        Solver reference;
+        assert(solver_create(&reference, run ? "fmm" : "n2", COUNT,
+                             NULL, 0, &error));
+        reference.acceleration(&view, expected[0], expected[1], expected[2], reference.context);
+        solver_destroy(&reference);
+        omp_set_num_threads(4);
+        for (size_t axis = 0; axis < 3; ++axis) {
             for (size_t i = 0; i < COUNT; ++i) {
-                bodies[i] = (ReferenceBody){1, {i & 1 ? scale : -scale,
-                                                i & 2 ? scale : -scale,
-                                                i & 4 ? scale : -scale}, {0}, {0}};
-            }
-            Simulation *state = from_bodies(bodies, COUNT);
-            SimulationView view = simulation_view(state);
-            double actual[3][COUNT], expected[3][COUNT];
-            solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
-            omp_set_num_threads(1);
-            /* Failed calls match direct summation; recovery matches a fresh
-             * serial FMM, including the low-order approximation error. */
-            Solver reference;
-            assert(solver_create(&reference, run ? "fmm" : "n2", COUNT,
-                                 run ? &option : NULL, run ? 1 : 0, &error));
-            reference.acceleration(&view, expected[0], expected[1], expected[2], reference.context);
-            solver_destroy(&reference);
-            omp_set_num_threads(4);
-            for (size_t axis = 0; axis < 3; ++axis) {
-                for (size_t i = 0; i < COUNT; ++i) {
-                    if (!run) {
-                        assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
-                               || actual[axis][i] == expected[axis][i]);
-                    } else {
-                        assert_close(actual[axis][i], expected[axis][i], 0);
-                    }
+                if (!run) {
+                    assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
+                           || actual[axis][i] == expected[axis][i]);
+                } else {
+                    assert_close(actual[axis][i], expected[axis][i], 0);
                 }
             }
-            MetadataCheck fallback = {.name = "direct_fallbacks"};
-            solver_diagnostics(&solver, find_metadata, &fallback);
-            assert(fallback.found && fallback.value.value.size == 1);
-            simulation_destroy(state);
         }
-        solver_destroy(&solver);
+        MetadataCheck fallback = {.name = "direct_fallbacks"};
+        solver_diagnostics(&solver, find_metadata, &fallback);
+        assert(fallback.found && fallback.value.value.size == 1);
+        simulation_destroy(state);
     }
+    solver_destroy(&solver);
     omp_set_num_threads(saved_threads);
     omp_set_dynamic(saved_dynamic);
 }
@@ -709,7 +711,7 @@ static void test_trajectory_thread_consistency(void)
         bodies[i].acceleration = (Vec3){1000, -2000, 3000};
     }
     const char *names[] = {"n2", "grouped-barnes-hut", "fmm"};
-    const SolverOption options[] = {{"theta", "0.5"}, {"order", "4"}};
+    const SolverOption theta = {"theta", "0.5"};
     for (size_t backend = 0; backend < 3; ++backend) {
         Simulation *states[2];
         for (size_t team = 0; team < 2; ++team) {
@@ -718,8 +720,7 @@ static void test_trajectory_thread_consistency(void)
             Solver solver;
             const char *error;
             assert(solver_create(&solver, names[backend], CLOUD_SIZE,
-                                backend ? &options[backend - 1] : NULL,
-                                backend ? 1 : 0, &error));
+                                &theta, backend == 1, &error));
             for (size_t run = 0; run < 2; ++run) {
                 simulate_with_solver(states[team], 0.0001, 5,
                                      solver.acceleration, solver.context);
@@ -954,7 +955,7 @@ static void test_barnes_hut_unrepresentable_tree(void)
     solver_destroy(&solver);
 }
 
-static void check_fmm_fallback_contract(const SolverOption *option)
+static void test_fmm_fallback_contract(void)
 {
     /* Overflow in aggregate mass must fall back to direct evaluation and recover
      * on a later ordinary call. All expected accelerations remain representable. */
@@ -963,7 +964,7 @@ static void check_fmm_fallback_contract(const SolverOption *option)
                              {1e308, {2e100,0,0}, {0}, {0}}};
     Solver solver;
     const char *error;
-    assert(solver_create(&solver, "fmm", 3, option, 1, &error));
+    assert(solver_create(&solver, "fmm", 3, NULL, 0, &error));
     for (size_t i = 0; i < 3; ++i) {
         bodies[i].w = 1;
     }
@@ -1010,9 +1011,6 @@ static void check_fmm_fallback_contract(const SolverOption *option)
         bodies[i].position.x = (double)i;
     }
     simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
-    MetadataCheck calls = {.name = "calls"};
-    solver_diagnostics(&solver, find_metadata, &calls);
-    assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 5);
     fallback.found = false;
     solver_diagnostics(&solver, find_metadata, &fallback);
     assert(fallback.found && fallback.value.value.size == 2);
@@ -1095,10 +1093,10 @@ void test_solver(void)
     test_n2_first_row_initialization();
     test_barnes_hut_topology_reuse();
     test_barnes_hut_nonfinite_reuse();
-    test_fmm_cutoff_settings();
     test_fmm_distant_groups();
+    test_fmm_approximates_separated_groups();
     test_fmm_sparse_cells();
-    test_fmm_order_contract();
+    test_fmm_fixed_order();
     test_tree_summary_reuse();
     test_gravity_accuracy();
     test_barnes_hut_monopole_acceleration();
@@ -1111,9 +1109,5 @@ void test_solver(void)
     test_barnes_hut_thread_consistency();
 #endif
     test_barnes_hut_unrepresentable_tree();
-    const char *orders[] = {"1", "2", "3", "4", "5", "6"};
-    for (size_t i = 0; i < sizeof(orders) / sizeof(orders[0]); ++i) {
-        SolverOption option = {"order", orders[i]};
-        check_fmm_fallback_contract(&option);
-    }
+    test_fmm_fallback_contract();
 }

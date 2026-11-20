@@ -4,8 +4,8 @@
 
 The project compares exact and approximate gravity solvers using kick-drift-kick
 leapfrog by default, with forward Euler available explicitly. `n2` is the direct numerical reference;
-Barnes–Hut trades accuracy for speed through theta, and FMM through expansion
-order. Solver speed depends on body count and spatial distribution: approximate
+Barnes–Hut trades accuracy for speed through theta. FMM uses fourth-order
+expansions. Solver speed depends on body count and spatial distribution: approximate
 solvers need not beat `n2` on small inputs. Evaluate numerical differences and
 runtime together using the same saved initial state, timestep, and step count.
 
@@ -41,8 +41,8 @@ Barnes–Hut variants, and FMM.
   all numerical summaries each call. Reuse is automatic; rebuilding occurs only
   when topology is unavailable or membership validation fails. Serial Barnes–Hut
   and FMM rebuild each call.
-- `src/laplace.*` owns expansion table preparation and translations;
-  `src/generated/` contains generated order-four arithmetic.
+- `src/laplace.*` owns the expansion interface and translations;
+  `src/generated/` contains the order-four tables and arithmetic.
 - `src/main.c` parses CLI arguments and prepares the selected solver.
 - `tests/test_main.c` runs the public state and solver contract tests in
   `tests/test_state.c` and `tests/test_solver.c`; `tests/test_cli.sh` checks CLI
@@ -91,11 +91,11 @@ make clean           # Remove build/; preserve results/
 ./build/app tests/data/two_body.txt 0.01 100 > build/final.txt
 ```
 
-The application accepts `[--solver NAME] [--integrator leapfrog|euler] [--theta VALUE | --order P] INPUT DT STEPS`
+The application accepts `[--solver NAME] [--integrator leapfrog|euler] [--theta VALUE] INPUT DT STEPS`
 and writes the final state to stdout. Use `n2`, `serial-barnes-hut`,
 `parallel-barnes-hut`, `grouped-barnes-hut`, or `fmm`. Theta defaults to 0.5 for Barnes–Hut runs;
 explicit theta requires Barnes–Hut and must be finite and nonnegative.
-FMM accepts integer orders 1 through 6 and defaults to 4. The benchmark runner accepts the same options.
+FMM uses fourth-order expansions. The benchmark runner accepts the same solver options.
 Use a different output filename from the input. Override compiler settings with
 commands such as `make CC=clang`; clean before changing compiler flags.
 All targets use `-O3 -g -fno-omit-frame-pointer`, with fast-math disabled and
@@ -156,8 +156,8 @@ python3 bench/run.py timing bench/data/*.txt --dt 0.0001 --steps 10 --samples 30
 
 The three-sample run verifies the workflow, not a reliable performance ranking.
 Use more samples and enough steps for performance studies. Select Barnes–Hut
-settings with `--solver grouped-barnes-hut --theta 0.5`, or FMM settings with
-`--solver fmm --order 4`.
+settings with `--solver grouped-barnes-hut --theta 0.5`, or select FMM with
+`--solver fmm`.
 
 `--dt` and `--steps` are required and positive; `dt` must be finite.
 Timing defaults to 10 samples (minimum 2);
