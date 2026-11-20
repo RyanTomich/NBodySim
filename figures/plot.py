@@ -235,21 +235,24 @@ def load_solver_sweep(directory, parallel=False):
     suite = "parallel-sweep" if parallel else "solver-sweep"
     # Archives without explicit configurations used the original solver names.
     solvers = ("n2", "barnes-hut") if parallel else ("n2", "barnes-hut", "fmm")
-    teams = (1, 4, 8) if parallel else (1,)
     status = json.loads((directory / "status.json").read_text())
     if status.get("status") != "ok" or status.get("suite") != suite:
         raise ValueError("Expected a successful solver sweep")
     settings = status["settings"]
     counts, steps = settings["bodies"], settings["steps"]
+    teams = settings["threads"] if parallel else [1]
+    if (not isinstance(teams, list) or not teams or any(type(t) is not int or t < 1 for t in teams)
+            or len(teams) != len(set(teams))):
+        raise ValueError("Invalid sweep thread counts")
     samples_count = settings["samples"]
     integrator = settings.get("integrator", "leapfrog")
     legacy = status.get("error_bars") == "individual_step_sample_sd"
     if (steps < 2 or not counts or len(set(counts)) != len(counts)
             or any(count <= 0 for count in counts)
-            or settings["threads"] != ([1, 4, 8] if parallel else 1)
+            or (not parallel and settings["threads"] != 1)
             or type(samples_count) is not int
             or (samples_count != 1 if legacy else samples_count < 2)
-            or settings["warmups"] != 0
+            or type(settings["warmups"]) is not int or settings["warmups"] < 0
             or integrator not in INTEGRATORS
             or status.get("error_bars") not in ("individual_step_sample_sd", "whole_run_sample_sd")):
         raise ValueError("Invalid sweep sample count or error-bar definition")
@@ -267,6 +270,7 @@ def load_solver_sweep(directory, parallel=False):
         if (not expected or len(expected) != len(configured) or not expected <= allowed
                 or {point[0] for point in expected} != set(counts)):
             raise ValueError("Invalid solver-sweep configurations")
+    reference_counts = {count for count, solver, _ in expected if solver == "n2"}
     with (directory / (suite + ".csv")).open(newline="") as source:
         rows = list(csv.DictReader(source))
     seen = set()
@@ -290,7 +294,7 @@ def load_solver_sweep(directory, parallel=False):
         if (case_status.get("status") != "ok" or case_status.get("threads") != threads
                 or case_status.get("solver") != solver or case_status.get("steps") != steps
                 or case_status.get("dt") != settings["dt"] or case_status.get("samples") != samples_count
-                or case_status.get("warmups") != 0 or case_status.get("integrator") != integrator
+                or case_status.get("warmups") != settings["warmups"] or case_status.get("integrator") != integrator
                 or case_status.get("force_evaluations_per_run") != force_evaluations(integrator, steps, count)):
             raise ValueError("Incomplete or inconsistent solver-sweep case")
         if parallel and (case_status.get("openmp") is not True
@@ -329,6 +333,10 @@ def load_solver_sweep(directory, parallel=False):
             row[field] = value
         for field in ("position", "velocity", "acceleration"):
             for suffix in ("_relative_l2", "_rms"):
+                if count not in reference_counts:
+                    if row.get(field + suffix) or row.get("reference_threads"):
+                        raise ValueError("Unexpected comparison without a direct reference")
+                    continue
                 text = row[field + suffix]
                 if text == "" and suffix == "_relative_l2":
                     continue  # Zero reference norm can make relative error undefined.
@@ -339,6 +347,13 @@ def load_solver_sweep(directory, parallel=False):
     if seen != expected:
         raise ValueError("Missing solver-sweep configurations")
     return status, rows
+
+
+def sweep_styles(rows):
+    styles = [("-", "o"), ("--", "s"), (":", "^"), ("-.", "D")]
+    standard = dict(zip((1, 4, 8, 16), styles))
+    return [(team, *standard.get(team, styles[index % len(styles)]))
+            for index, team in enumerate(sorted({row["threads"] for row in rows}))]
 
 
 def draw_parallel_sweep(plt, data):
@@ -367,7 +382,7 @@ def draw_parallel_sweep_normalized(plt, data):
     fig.text(0.55, 0.95, "Flat curves indicate runtime growing at the expected rate.",
              ha="center", fontsize=8)
     for ax, (solver, label, color) in zip(axes[:, 0], solvers):
-        for threads, line, marker in ((1, "-", "o"), (4, "--", "s"), (8, ":", "^")):
+        for threads, line, marker in sweep_styles(rows):
             points = sorted((row for row in rows if row["solver"] == solver and row["threads"] == threads),
                             key=lambda row: row["bodies"])
             # n log(n) is zero at n=1, so that point has no normalized value.
@@ -386,7 +401,7 @@ def draw_parallel_sweep_normalized(plt, data):
         ax.set_ylim(bottom=0)
         ax.grid(which="major", color="0.9", linewidth=0.4)
         ax.set_axisbelow(True)
-        ax.legend(frameon=False, ncol=3, loc="lower right", bbox_to_anchor=(1, 1),
+        ax.legend(frameon=False, ncol=min(4, len(sweep_styles(rows))), loc="lower right", bbox_to_anchor=(1, 1),
                   borderaxespad=0, columnspacing=1.2, handletextpad=0.5, fontsize=8)
     counts = sorted(status["settings"]["bodies"])
     axes[-1, 0].set_xticks(counts)
@@ -409,11 +424,11 @@ def draw_solver_sweep(plt, data, parallel=False):
     error_field = "step_sd_ms" if legacy else "stddev_ms_per_step"
     expanded = parallel and any(row["solver"] in BARNES_HUT_SOLVERS for row in rows)
     fig, ax = plt.subplots(figsize=(5.5, 5 if expanded else 4 if parallel else 3.5))
-    styles = ((1, "-"), (4, "--"), (8, ":")) if parallel else ((1, "-"),)
+    styles = sweep_styles(rows)
     markers = {"n2": "o", "serial-barnes-hut": "P", "parallel-barnes-hut": "D",
                "grouped-barnes-hut": "s", "barnes-hut": "s", "fmm": "^"}
     for solver, label, color in SWEEP_SOLVERS:
-        for threads, line in styles:
+        for threads, line, _ in styles:
             points = sorted((row for row in rows if row["solver"] == solver and row["threads"] == threads),
                             key=lambda row: row["bodies"])
             if not points:

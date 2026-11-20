@@ -61,6 +61,51 @@ class SolverSweepTests(unittest.TestCase):
                           ("fmm", 1), ("fmm", 4), ("fmm", 8)))
         self.assertEqual(sweep.parse_args(["--parallel", "--steps", "5"]).steps, 5)
 
+    def test_engaging_matrix_and_reference(self):
+        args = sweep.parse_args(["--engaging"])
+        self.assertEqual((args.samples, args.steps, args.warmups), (3, 20, 1))
+        self.assertEqual(args.solvers, ["n2", "grouped-barnes-hut", "fmm"])
+        teams = {1000: [1, 4, 8, 16], 5000: [1, 4, 8, 16], 10000: [1, 4, 8, 16],
+                 50000: [4, 8, 16], 100000: [8, 16]}
+        self.assertEqual(args.bodies, list(teams))
+        for count, selected in teams.items():
+            self.assertEqual(sweep.configurations(count, True, args.solvers, args.threads, True),
+                             [("n2", t) for t in selected] +
+                             [(solver, t) for solver in ("grouped-barnes-hut", "fmm")
+                              for t in (1, 4, 8, 16)])
+        self.assertEqual(sweep.configurations(100000, True, ["fmm", "n2"], [4, 1]),
+                         [("n2", 1), ("n2", 4), ("fmm", 1), ("fmm", 4)])
+
+    @unittest.skipUnless((ROOT / "build/bench_steps_openmp").exists(), "requires OpenMP build")
+    def test_warm_timing_only_subset_loads_without_reference(self):
+        with TemporaryDirectory() as temporary:
+            args = sweep.parse_args(["--engaging", "--threads", "4", "--solvers", "fmm",
+                                     "--bodies", "32", "--steps", "2", "--results-dir", temporary])
+            with patch.object(sweep, "build", return_value=ROOT / "build/bench_steps_openmp"), \
+                    patch("builtins.print"):
+                self.assertEqual(sweep.experiment(args), 0)
+            folder = next(Path(temporary).iterdir())
+            status, rows = load_parallel_sweep(folder)
+            self.assertEqual(status["settings"]["warmups"], 1)
+            self.assertEqual([(r["solver"], r["threads"], r["reference_threads"]) for r in rows],
+                             [("fmm", 4, "")])
+            self.assertFalse(list(folder.rglob("error.csv")))
+
+    def test_step_placement_requires_distinct_cores_on_one_socket(self):
+        for required, topology, valid in [
+                (2, [("0", "1"), ("0", "2")], True),
+                (3, [("0", "1"), ("0", "2")], False),
+                (2, [("0", "1"), ("1", "2")], False),
+                (2, [("0", "1"), ("0", "1")], False)]:
+            with patch.object(os, "sched_getaffinity", return_value=[0, 1], create=True), \
+                    patch.object(Path, "read_text", side_effect=[x for pair in topology for x in pair]), \
+                    patch.object(Path, "is_file", return_value=False), patch("builtins.print"):
+                if valid:
+                    sweep.check_placement(required)
+                else:
+                    with self.assertRaisesRegex(ValueError, "affinity"):
+                        sweep.check_placement(required)
+
     def test_large_parallel_configurations(self):
         self.assertEqual(sweep.configurations(50000, True), list(sweep.PARALLEL_SERIES))
         for count in (50001, 100000, 200000):

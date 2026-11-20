@@ -506,7 +506,8 @@ static void test_gravity_accuracy(void)
 #ifdef _OPENMP
 static void test_fmm_thread_consistency(void)
 {
-    enum { COUNT = 1536 };
+    const int threads[] = {1, 3, 8, 12};
+    enum { COUNT = 1536, TEAMS = sizeof(threads) / sizeof(threads[0]) };
     const struct { size_t count; int distribution; } cases[] = {
         {1023, 0}, {1024, 0}, {COUNT, 0}, {COUNT, 1}, {COUNT, 2}, {COUNT, 3}
     };
@@ -520,7 +521,8 @@ static void test_fmm_thread_consistency(void)
                           (double)(i / 169) - 4};
             if (cases[c].distribution == 1) {
                 double offset = i < count * 9 / 10 ? -20 : 20;
-                point = (Vec3){offset + point.x * 0.1, point.y * 0.1, point.z * 0.1};
+                point = (Vec3){offset + point.x * 0.1, offset + point.y * 0.1,
+                               offset + point.z * 0.1};
             } else if (cases[c].distribution == 2) {
                 point = (Vec3){0.125 * (double)i, i % 2 ? -10 : 10, 0};
             } else if (cases[c].distribution == 3) {
@@ -536,10 +538,10 @@ static void test_fmm_thread_consistency(void)
         for (size_t run = 0; run < 2; ++run) {
             Vec3 expected[COUNT];
             reference_accelerations(bodies, count, expected);
-            Simulation *states[2];
-            double actual[2][3][COUNT];
-            for (size_t team = 0; team < 2; ++team) {
-                omp_set_num_threads(team ? 4 : 1);
+            Simulation *states[TEAMS];
+            double actual[TEAMS][3][COUNT];
+            for (size_t team = 0; team < TEAMS; ++team) {
+                omp_set_num_threads(threads[team]);
                 states[team] = from_bodies(bodies, count);
                 SimulationView view = simulation_view(states[team]);
                 solver.acceleration(&view, actual[team][0], actual[team][1], actual[team][2],
@@ -551,14 +553,16 @@ static void test_fmm_thread_consistency(void)
             }
             double error_norm = 0, reference_norm = 0;
             for (size_t i = 0; i < count; ++i) {
-                for (size_t axis = 0; axis < 3; ++axis) {
-                    assert_close(actual[1][axis][i], actual[0][axis][i], 0);
+                for (size_t team = 1; team < TEAMS; ++team) {
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        assert_close(actual[team][axis][i], actual[0][axis][i], 0);
+                    }
+                    assert_body(body_at(states[team], i), body_at(states[0], i), 0);
                 }
                 error_norm = hypot(error_norm, hypot(hypot(actual[0][0][i] - expected[i].x,
                                   actual[0][1][i] - expected[i].y), actual[0][2][i] - expected[i].z));
                 reference_norm = hypot(reference_norm, hypot(hypot(expected[i].x, expected[i].y),
                                                              expected[i].z));
-                assert_body(body_at(states[0], i), body_at(states[1], i), 0);
                 /* Reuse the solver with a new allocation, masses, and positions. */
                 bodies[i].w *= 1.25;
                 bodies[i].position.x *= 1.1;
@@ -566,9 +570,13 @@ static void test_fmm_thread_consistency(void)
             }
             /* Fixture-specific accuracy budget. */
             assert_close(error_norm, 0, 0.1 * (1 + reference_norm));
-            simulation_destroy(states[0]);
-            simulation_destroy(states[1]);
+            for (size_t team = 0; team < TEAMS; ++team) {
+                simulation_destroy(states[team]);
+            }
         }
+        MetadataCheck fallback = {.name = "direct_fallbacks"};
+        solver_diagnostics(&solver, find_metadata, &fallback);
+        assert(fallback.found && fallback.value.value.size == 0);
         solver_destroy(&solver);
     }
     omp_set_num_threads(saved_threads);
@@ -581,7 +589,7 @@ static void test_fmm_parallel_fallback(void)
     ReferenceBody bodies[COUNT];
     int saved_threads = omp_get_max_threads(), saved_dynamic = omp_get_dynamic();
     omp_set_dynamic(0);
-    omp_set_num_threads(4);
+    omp_set_num_threads(12);
     Solver solver;
     const char *error;
     assert(solver_create(&solver, "fmm", COUNT, NULL, 0, &error));
@@ -606,7 +614,7 @@ static void test_fmm_parallel_fallback(void)
                              NULL, 0, &error));
         reference.acceleration(&view, expected[0], expected[1], expected[2], reference.context);
         solver_destroy(&reference);
-        omp_set_num_threads(4);
+        omp_set_num_threads(12);
         for (size_t axis = 0; axis < 3; ++axis) {
             for (size_t i = 0; i < COUNT; ++i) {
                 if (!run) {

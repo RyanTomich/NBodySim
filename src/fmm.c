@@ -151,10 +151,10 @@ typedef struct {
     double *acceleration[3];
 } Field;
 
-static void evaluate_direct_pair(const Fmm *f, const Field *field,
-                                 const OctreeNode *source, const OctreeNode *target)
+static void evaluate_direct_range(const Fmm *f, const Field *field,
+                                  const OctreeNode *source, size_t begin, size_t end)
 {
-    for (size_t p = target->begin; p < target->end; ++p) {
+    for (size_t p = begin; p < end; ++p) {
         size_t i = f->tree.indices[p];
         Vec3 sum = {field->acceleration[0][i], field->acceleration[1][i],
                     field->acceleration[2][i]};
@@ -166,7 +166,8 @@ static void evaluate_direct_pair(const Fmm *f, const Field *field,
     }
 }
 
-static bool interact(const Fmm *f, const Field *field, size_t source, size_t target)
+static bool interact(const Fmm *f, const Field *field, size_t source, size_t target,
+                     size_t grain)
 {
     const OctreeNode *s = &f->tree.nodes[source], *t = &f->tree.nodes[target];
     double dx = t->center.x - s->center.x, dy = t->center.y - s->center.y;
@@ -184,15 +185,53 @@ static bool interact(const Fmm *f, const Field *field, size_t source, size_t tar
         return true;
     }
     if (s->is_leaf && t->is_leaf) {
-        evaluate_direct_pair(f, field, s, t);
+#ifdef _OPENMP
+        if (t->end - t->begin > grain) {
+            for (size_t begin = t->begin; begin < t->end; begin += grain) {
+                size_t end = begin + grain < t->end ? begin + grain : t->end;
+#pragma omp task firstprivate(f, field, s, begin, end)
+                evaluate_direct_range(f, field, s, begin, end);
+            }
+#pragma omp taskwait
+            return true;
+        }
+#endif
+        evaluate_direct_range(f, field, s, t->begin, t->end);
         return true;
     }
     bool split_target = s->is_leaf || (!t->is_leaf && t->half_width >= s->half_width);
+#ifdef _OPENMP
+    if (split_target && t->end - t->begin > grain) {
+        bool failed[8] = {false};
+        for (int c = 0; c < 8; ++c) {
+            size_t child = t->children[c];
+            if (child == SIZE_MAX) {
+                continue;
+            }
+            const OctreeNode *node = &f->tree.nodes[child];
+            if (node->begin == t->begin && node->end == t->end) {
+                return interact(f, field, source, child, grain); /* Only child. */
+            }
+            /* Sibling targets own disjoint locals and acceleration entries. */
+#pragma omp task firstprivate(f, field, source, child, grain, c) shared(failed)
+            failed[c] = !interact(f, field, source, child, grain);
+        }
+#pragma omp taskwait
+        for (int c = 0; c < 8; ++c) {
+            if (failed[c]) {
+                return false;
+            }
+        }
+        return true;
+    }
+#endif
+    /* Source siblings accumulate into the same target in octant order. */
     const OctreeNode *split = split_target ? t : s;
     for (int c = 0; c < 8; ++c) {
         size_t child = split->children[c];
         if (child != SIZE_MAX &&
-            !interact(f, field, split_target ? source : child, split_target ? child : target)) {
+            !interact(f, field, split_target ? source : child, split_target ? child : target,
+                      grain)) {
             return false;
         }
     }
@@ -202,35 +241,26 @@ static bool interact(const Fmm *f, const Field *field, size_t source, size_t tar
 static bool interaction_pass(const Fmm *f, const Field *field)
 {
 #ifdef _OPENMP
-    int workers = omp_get_max_threads();
-    if (workers < 2 || field->state->count < 1024) {
-        return interact(f, field, 0, 0);
-    }
-    const OctreeNode *root = &f->tree.nodes[0];
-    size_t targets[8];
-    int jobs = 0;
-    for (int c = 0; c < 8; ++c) {
-        if (root->children[c] != SIZE_MAX) {
-            targets[jobs++] = root->children[c];
+    size_t count = field->state->count;
+    if (count >= 1024 && omp_get_max_threads() > 1) {
+        bool success;
+#pragma omp parallel
+        {
+#pragma omp single
+            {
+                size_t workers = (size_t)omp_get_num_threads();
+                /* Aim for four pieces per worker, with at least 64 targets per piece. */
+                size_t grain = 1 + (count - 1) / workers / 4;
+                if (grain < 64) {
+                    grain = 64;
+                }
+                success = interact(f, field, 0, 0, workers > 1 ? grain : SIZE_MAX);
+            }
         }
+        return success;
     }
-    if (jobs < 2) {
-        return interact(f, field, 0, 0);
-    }
-    if (workers > jobs) {
-        workers = jobs;
-    }
-    /* Root-to-root traversal first splits the target. Its child subtrees
-     * have disjoint outputs and each retains the original source order. */
-    int failed = 0;
-#pragma omp parallel for schedule(dynamic, 1) num_threads(workers) reduction(|:failed)
-    for (int i = 0; i < jobs; ++i) {
-        failed |= !interact(f, field, 0, targets[i]);
-    }
-    return !failed;
-#else
-    return interact(f, field, 0, 0);
 #endif
+    return interact(f, field, 0, 0, SIZE_MAX);
 }
 
 static bool downward_pass(Fmm *f, Field *field)

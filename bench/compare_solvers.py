@@ -19,16 +19,55 @@ import sys
 import run as runner
 
 SOLVERS = ("n2", "serial-barnes-hut", "grouped-barnes-hut", "fmm")
+PARALLEL_SOLVERS = ("n2", *runner.BARNES_HUT_SOLVERS, "fmm")
 PARALLEL_SERIES = tuple(
-    (solver, threads) for solver in ("n2", *runner.BARNES_HUT_SOLVERS, "fmm")
+    (solver, threads) for solver in PARALLEL_SOLVERS
     for threads in ((1,) if solver == "serial-barnes-hut" else (1, 4, 8))
 )
 
 
-def configurations(count, parallel):
-    series = PARALLEL_SERIES if parallel else tuple((solver, 1) for solver in SOLVERS)
-    return [(solver, threads) for solver, threads in series
-            if not (parallel and count > 50000 and solver == "n2" and threads != 8)]
+def configurations(count, parallel, solvers=None, teams=None, engaging=False):
+    legacy_selection = parallel and solvers is None and teams is None and not engaging
+    selected = solvers or (PARALLEL_SOLVERS if parallel else SOLVERS)
+    teams = sorted(teams or ((1, 4, 8) if parallel else (1,)))
+    skipped_direct = {50000: (1,), 100000: (1, 4)}.get(count, ()) if engaging else ()
+    cases = []
+    # Visit direct first so its smallest eligible team supplies the reference.
+    for solver in PARALLEL_SOLVERS:
+        if solver not in selected:
+            continue
+        for team in teams:
+            if solver == "serial-barnes-hut" and team != 1:
+                continue
+            if solver == "n2" and team in skipped_direct:
+                continue
+            if legacy_selection and count > 50000 and solver == "n2" and team != 8:
+                continue
+            cases.append((solver, team))
+    return cases
+
+
+def check_placement(required):
+    """Inspect Linux job-step affinity before the build or any timed run."""
+    if not hasattr(os, "sched_getaffinity"):
+        raise ValueError("Job-step affinity validation requires Linux")
+    cpus = sorted(os.sched_getaffinity(0))
+    cores = set()
+    sockets = set()
+    governors = set()
+    for cpu in cpus:
+        root = Path("/sys/devices/system/cpu/cpu{}".format(cpu))
+        socket = (root / "topology/physical_package_id").read_text().strip()
+        sockets.add(socket)
+        cores.add((socket, (root / "topology/core_id").read_text().strip()))
+        governor = root / "cpufreq/scaling_governor"
+        if governor.is_file():
+            governors.add(governor.read_text().strip())
+    print("Step CPUs={} sockets={} physical cores={} governors={}".format(
+        cpus, sorted(sockets), len(cores), sorted(governors) or "unavailable"), flush=True)
+    if len(sockets) != 1 or len(cores) < required or len(cores) != len(cpus):
+        raise ValueError("Unsuitable job-step affinity {} for {} physical cores on one socket".format(
+            cpus, required))
 
 
 @contextmanager
@@ -85,12 +124,13 @@ def build(directory, parallel=False):
 def collect(binary, instance, case, solver, args, threads=1):
     case.mkdir()
     integrator = getattr(args, "integrator", "leapfrog")
+    warmups = getattr(args, "warmups", 0)
     status = {"status": "failed", "solver": solver, "threads": threads,
-              "steps": args.steps, "dt": args.dt, "samples": args.samples, "warmups": 0,
+              "steps": args.steps, "dt": args.dt, "samples": args.samples, "warmups": warmups,
               "integrator": integrator,
               "started": runner.now()}
     try:
-        command = [binary, instance, str(args.dt), str(args.steps), str(args.samples), "0",
+        command = [binary, instance, str(args.dt), str(args.steps), str(args.samples), str(warmups),
                    "timing", case / "final.txt", solver]
         if solver in runner.BARNES_HUT_SOLVERS:
             command.extend(["theta", str(args.theta)])
@@ -141,14 +181,16 @@ def experiment(args):
     suite = "parallel-sweep" if args.parallel else "solver-sweep"
     max_speed = 0 if args.distribution == "clusters" else 3
     integrator = getattr(args, "integrator", "leapfrog")
+    cases = {count: configurations(count, args.parallel, args.solvers, args.threads, args.engaging)
+             for count in args.bodies}
     settings = {"bodies": args.bodies, "steps": args.steps, "dt": args.dt,
                 "integrator": integrator,
                 "theta": args.theta, "order": runner.FMM_ORDER,
                 "configurations": [{"bodies": count, "solver": solver, "threads": threads}
                                    for count in args.bodies
-                                   for solver, threads in configurations(count, args.parallel)],
-                "threads": [1, 4, 8] if args.parallel else 1,
-                "samples": args.samples, "warmups": 0, "seed": args.seed,
+                                   for solver, threads in cases[count]],
+                "threads": (args.threads or [1, 4, 8]) if args.parallel else 1,
+                "samples": args.samples, "warmups": args.warmups, "seed": args.seed,
                 "generator": {"distribution": args.distribution,
                               "L": 10 if args.distribution == "uniform" else None,
                               "w_min": 1, "w_max": 100, "v_max": max_speed, "a_max": 0}}
@@ -157,6 +199,8 @@ def experiment(args):
     runner.write_json(directory / "status.json", status)
     rows = []
     try:
+        if args.check_placement:
+            check_placement(max(team for points in cases.values() for _, team in points))
         binary = build(directory, args.parallel)
         for count in args.bodies:
             folder = directory / str(count)
@@ -170,7 +214,8 @@ def experiment(args):
                                  stderr="generation.stderr.log"):
                 raise RuntimeError("Input generation failed; see " + str(folder))
             reference = None
-            for solver, threads in configurations(count, args.parallel):
+            reference_threads = None
+            for solver, threads in cases[count]:
                 print("N={} {}: {} runs × {} steps, {} threads".format(
                     count, solver, args.samples, args.steps, threads), flush=True)
                 case = folder / ("{}-{}threads".format(solver, threads) if args.parallel else solver)
@@ -178,9 +223,12 @@ def experiment(args):
                 if solver == "n2" and reference is None:
                     reference = final
                     reference_threads = threads
-                distribution = runner.save_distribution_errors(case, final, reference)
-                errors = runner.trajectory_errors(final, reference)
-                runner.write_csv(case / "error.csv", list(errors[0]), errors)
+                distribution = {}
+                errors = []
+                if reference is not None:
+                    distribution = runner.save_distribution_errors(case, final, reference)
+                    errors = runner.trajectory_errors(final, reference)
+                    runner.write_csv(case / "error.csv", list(errors[0]), errors)
                 row = {"bodies": count, "solver": solver, "threads": threads, "steps": args.steps,
                        "dt": args.dt, "samples": args.samples, "integrator": integrator,
                        "force_evaluations_per_run": runner.force_evaluations(integrator, args.steps, count),
@@ -193,7 +241,8 @@ def experiment(args):
                     row[error["field"] + "_relative_l2"] = error["relative_l2_error"]
                     row[error["field"] + "_rms"] = error["rms_error"]
                 rows.append(row)
-                runner.write_csv(directory / (suite + ".csv"), list(rows[0]), rows)
+                fields = dict.fromkeys(key for result in rows for key in result)
+                runner.write_csv(directory / (suite + ".csv"), list(fields), rows)
                 print("  {:.6g} ms/step; run SD {:.3g} ms".format(
                     row["mean_ms_per_step"], row["stddev_ms_per_step"]), flush=True)
         status["status"] = "ok"
@@ -210,6 +259,11 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parallel", action="store_true",
                         help="compare OpenMP solvers at 1/4/8 threads and the serial baseline at 1")
+    parser.add_argument("--engaging", action="store_true", help="use the Engaging scaling workload and large-body skips")
+    parser.add_argument("--check-placement", action="store_true", help="validate Linux job-step CPU affinity")
+    parser.add_argument("--threads", type=int, nargs="+", help="OpenMP team sizes")
+    parser.add_argument("--solvers", nargs="+", choices=PARALLEL_SOLVERS)
+    parser.add_argument("--warmups", type=int, help="discarded trajectories per case")
     parser.add_argument("--integrator", choices=runner.INTEGRATORS, default="leapfrog")
     parser.add_argument("--bodies", nargs="+", type=int, help="body counts (parallel default extends through 100000)")
     parser.add_argument("--steps", type=int, default=20)
@@ -221,6 +275,22 @@ def parse_args(argv=None):
                         help="initial positions; clusters start from rest")
     parser.add_argument("--results-dir", type=Path)
     args = parser.parse_args(argv)
+    if args.engaging:
+        args.parallel = True
+        args.threads = args.threads or [1, 4, 8, 16]
+        args.solvers = args.solvers or ["n2", "grouped-barnes-hut", "fmm"]
+        args.bodies = args.bodies or [1000, 5000, 10000, 50000, 100000]
+    if args.warmups is None:
+        args.warmups = int(args.engaging)
+    if args.warmups < 0:
+        parser.error("warmups must be nonnegative")
+    if args.threads:
+        if not args.parallel or min(args.threads) <= 0 or len(set(args.threads)) != len(args.threads):
+            parser.error("--threads requires a parallel sweep and unique positive team sizes")
+        args.threads.sort()
+    if args.solvers and (len(set(args.solvers)) != len(args.solvers)
+                         or (not args.parallel and "parallel-barnes-hut" in args.solvers)):
+        parser.error("duplicate or incompatible solver selection")
     if args.bodies is None:
         args.bodies = [1000, 5000, 10000, 20000, 50000] + ([100000] if args.parallel else [])
     if args.results_dir is None:
@@ -234,6 +304,9 @@ def parse_args(argv=None):
     if not math.isfinite(args.theta) or args.theta < 0:
         parser.error("theta must be finite and nonnegative")
     args.bodies.sort()
+    for count in args.bodies:
+        if not configurations(count, args.parallel, args.solvers, args.threads, args.engaging):
+            parser.error("no eligible solver/thread configurations at {} bodies".format(count))
     return args
 
 

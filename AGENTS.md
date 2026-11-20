@@ -11,7 +11,7 @@ runtime together using the same saved initial state, timestep, and step count.
 
 The implementation is C17 with OpenMP enabled by default for leapfrog body
 updates, triangular `n2` pair evaluation, particle- and leaf-parallel Barnes–Hut
-evaluation, and FMM root-target interactions. OpenMP builds require compiler
+evaluation, and recursive FMM target tasks. OpenMP builds require compiler
 and runtime support. Serial builds need only the math library.
 Building requires Make and a C compiler; generation and benchmarking
 use Python 3.8+ and its standard library. See `README.md` for usage and
@@ -115,10 +115,12 @@ private arrays, then combines participating workers in ascending index order.
 Smaller runtime teams are safe; single-thread execution uses the original serial
 kernel. Parallel `n2` changes summation order, so compare thread counts with
 numerical tolerances rather than bitwise equality. A prepared solver must not be
-called concurrently. FMM reads the current thread setting on each evaluation;
-at least 1,024 bodies and two occupied root children enable one parallel loop
-over disjoint target subtrees, capped at eight workers. Jobs use stack-local
-scratch and retain source accumulation order. Uneven subtrees limit scaling.
+called concurrently. FMM reads the current thread setting on each evaluation.
+With at least 1,024 bodies and multiple workers, one team handles recursive
+tasks for disjoint target subtrees and target-body ranges in oversized leaves.
+The task grain is the body count divided by four times the actual team size,
+rounded up with a minimum of 64. Visit source children in octant order and
+join target tasks before returning from a split or invoking the direct fallback.
 Tree construction and validation, serial and grouped Barnes–Hut aggregation,
 FMM upward/downward passes, and FMM direct fallbacks stay serial. Leapfrog uses static parallel loops for
 half-kick/drift and final half-kick, with implicit synchronization before and after the single force call

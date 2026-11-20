@@ -92,12 +92,12 @@ one-thread execution use the original serial kernel. Parallel `n2` changes
 addition order, so results can differ slightly across thread counts through
 floating-point rounding; bitwise equality is not guaranteed.
 
-FMM reads the current OpenMP thread setting on each force evaluation. With at
-least 1,024 bodies and two occupied root children, it distributes those target
-subtrees over at most eight workers. Each job uses small stack-local scratch;
-source traversal and accumulation order remain unchanged. Smaller inputs,
-single-worker runs, and roots with fewer than two children use the serial
-traversal. Uneven subtree populations can limit speedup.
+FMM reads the OpenMP thread setting on each force evaluation. With at least
+1,024 bodies and multiple workers, one team handles the interaction pass.
+As the traversal descends, large target cells create tasks for their occupied
+children, so workers can share the work within a dense octant. Direct interactions
+in oversized leaves split by target body. Each target accumulates its sources
+in serial traversal order. Smaller inputs and single-worker runs traverse inline.
 
 A prepared solver must not be called concurrently. Tree construction and
 validation are serial. Only the particle-parallel Barnes–Hut backend uses
@@ -535,6 +535,53 @@ plotted point: body count, solver, threads, mean runtime and sample SD in ms/ste
 plus steps, timestep, sample count, theta, and FMM order. Historical single-run
 data exports its plotted step-to-step SD as `step_sd_ms`; newer runs use
 `stddev_ms_per_step` for between-run SD.
+
+### MIT Engaging submission
+
+Submit from the repository root. Run one sweep at a time per checkout because
+the build uses the shared `build/` directory.
+
+```sh
+sbatch bench/engaging.sbatch
+# Smaller submission using the same job script
+sbatch -c 4 bench/engaging.sbatch --threads 1 4 --bodies 1000 5000 --steps 3
+# After completion, replace JOBID with the submitted job number
+sacct -j JOBID --units=G -o JobID,State,Elapsed,AllocCPUS,ReqMem,MaxRSS
+```
+
+The job runs direct `n2`, `grouped-barnes-hut`, and `fmm` sequentially using
+one archived OpenMP binary. Each body count shares one uniform input (seed 42).
+Each case resets to that input for one discarded warmup and three measured
+20-step leapfrog trajectories with `dt=0.0001`, theta 0.5 for Barnes–Hut,
+and order four for FMM.
+
+| Bodies | Direct threads | Grouped Barnes–Hut and FMM threads | Direct reference threads |
+| --- | --- | --- | --- |
+| 1,000, 5,000, 10,000 | 1, 4, 8, 16 | 1, 4, 8, 16 | 1 |
+| 50,000 | 4, 8, 16 | 1, 4, 8, 16 | 4 |
+| 100,000 | 8, 16 | 1, 4, 8, 16 | 8 |
+
+This schedule produces 57 cases and 171 measured trajectories. A 16-thread
+FMM timing includes the entire integration, with all 16 workers available to
+the interaction pass on inputs of at least 1,024 bodies.
+
+The script requests one exclusive `mit_normal` node for four hours, 8 GB,
+and one task with 16 physical cores. It requests the performance governor,
+uses block placement, disables SMT for the allocation, and binds OpenMP
+workers to nearby cores. The job checks its actual CPU mask for single-socket
+placement and one logical CPU per physical core before building. The Slurm log
+records the mask, topology, readable governors, compiler, Git revision, and
+result path. Check elapsed time and peak memory with the accounting command
+above when sizing subsequent jobs.
+
+The wrapper forwards sweep arguments including `--threads`, `--solvers`,
+`--bodies`, `--steps`, `--samples`, and `--warmups`. Its workload is also
+available locally with `python3 bench/compare_solvers.py --engaging`.
+For an explicit parallel selection without the Engaging skips, use
+`--parallel --threads ... --solvers ...`. The lowest eligible direct team
+supplies the reference at each size. Omitting `n2` produces timings and final
+states without trajectory comparisons. Use the same plotting command as
+the standalone parallel sweep for both figures and the plotted CSV.
 
 ## Paper figures
 
