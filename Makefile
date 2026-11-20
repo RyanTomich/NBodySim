@@ -56,8 +56,31 @@ all: build/app build/bench
 build/app: $(SOURCES) $(HEADERS) Makefile | build
 	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -Isrc $(SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
 
-build/bench: $(BENCH_SOURCES) $(HEADERS) Makefile | build
+# The REBOUND comparison uses the same timer plus the existing untimed team check.
+build/bench_grouped_compare: override CPPFLAGS += -DNBODY_BENCH_OPENMP
+build/bench build/bench_grouped_compare: $(BENCH_SOURCES) $(HEADERS) Makefile | build
 	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -Isrc $(BENCH_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
+
+REBOUND_SRC := third_party/rebound/src
+ifeq ($(shell uname -s),Darwin)
+REBOUND_LIB_ID := -Wl,-install_name,@rpath/librebound.so
+REBOUND_RPATH := @loader_path
+else
+REBOUND_RPATH := $$ORIGIN
+endif
+
+.PHONY: rebound-benchmark
+rebound-benchmark: build/bench_grouped_compare build/bench_rebound
+
+build/librebound.so: $(REBOUND_SRC)/Makefile $(REBOUND_SRC)/Makefile.defs $(wildcard $(REBOUND_SRC)/*.[chs]) Makefile | build
+	$(MAKE) -B -C $(REBOUND_SRC) OPENMP=1 QUADRUPOLE=0 SERVER=0 MPI=0 OPENGL=0 FFTW=0 \
+	    CC="$(CC)" OPT="$(CPPFLAGS) $(CFLAGS) -Wno-strict-prototypes -D_GNU_SOURCE -fPIC $(OMPFLAGS)" \
+	    LIB="$(LDFLAGS) $(LDLIBS) $(OMPLIBS) $(REBOUND_LIB_ID)"
+	cp $(REBOUND_SRC)/librebound.so $@
+
+build/bench_rebound: bench/comparison/rebound_driver.c src/io.c src/parse.c src/state.c $(HEADERS) build/librebound.so
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -DOPENMP -Isrc -isystem $(REBOUND_SRC) \
+	    $(filter %.c,$^) -Lbuild -lrebound -Wl,-rpath,'$(REBOUND_RPATH)' $(LDLIBS) $(OPENMP_LIBS) -o $@
 
 # Serial, opt-in per-step observation; ordinary benchmark binaries are unchanged.
 build/bench_steps: $(BENCH_SOURCES) $(HEADERS) Makefile | build

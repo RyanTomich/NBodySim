@@ -168,6 +168,35 @@ drift; success means metrics were computed, not that an accuracy threshold passe
 New timing and reference status files record the selected integrator and its
 force evaluation count.
 
+### Compare grouped Barnes–Hut with REBOUND
+
+Run these commands from the repository root with an OpenMP-capable C toolchain.
+The script builds the pinned REBOUND 5.2.2 C library and both timing drivers,
+checks REBOUND against an independent two-body calculation, and prints the
+result directory under `results/rebound/`.
+
+```sh
+git submodule update --init -- third_party/rebound
+python3 bench/compare_rebound.py
+```
+
+Both solvers start from the same saved 10,000-body uniform input (seed 42).
+Each takes 20 steps of length 0.0001 on four OpenMP workers. Three pairs run
+sequentially with alternating order, a fresh process per sample and zero warmups.
+The timer covers only the native simulation call. The local solver uses theta
+0.5 and takes 21 force evaluations with kick–drift–kick. REBOUND uses monopoles,
+`opening_angle2=0.25`, and takes 20 evaluations with drift–kick–drift. It uses
+one isolated root cube of side 32. Both runs use unit gravity and zero softening.
+
+`samples.csv` records whole-run seconds in execution order. `summary.csv` gives
+the mean and sample SD in ms/step. The reported ratio divides REBOUND's mean by
+the local mean, so values above one favor grouped Barnes–Hut. Three samples
+provide an initial comparison on this workload. `trajectory-differences.csv`
+gives the RMS length of the position and velocity difference vectors for each
+pair, in simulation units. These reflect both the tree approximations and the
+integrators. The saved REBOUND accelerations correspond to the last kick at
+the midpoint of the step. Check `status.json` for completion and revisions.
+
 ### Grouped Barnes–Hut phase experiment
 
 ```sh
