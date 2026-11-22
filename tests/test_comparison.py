@@ -1,16 +1,14 @@
-"""Regression checks for the current benchmark matrix and saved-data validation."""
+"""Regression checks for REBOUND checkout and saved comparison data."""
 
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 import compare_rebound
-from compare_native import configurations_for, samples_for, summarize
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "figures"))
 from plot import load_comparison, SERIES
 from run import write_csv, write_json
@@ -60,30 +58,14 @@ class ComparisonTests(unittest.TestCase):
             self.rows.append({"bodies": 1000, "implementation": name, "requested_threads": threads,
                               "effective_threads": threads, "integrator": "leapfrog", "steps": 10,
                               "dt": 0.0001, "theta": "" if name == "n2" else 0.5,
-                              "force_evaluations_per_run": 11, **summarize([0.01, 0.03], 10),
+                              "force_evaluations_per_run": 11, "samples": 2,
+                              "mean_ms_per_step": 2, "median_ms_per_step": 2,
+                              "stddev_ms_per_step": 2 ** 0.5,
                               "force_relative_l2": 0.001, "force_rms_absolute": 0.0001})
         self.save_rows()
 
     def save_rows(self):
         write_csv(self.root / "comparison.csv", list(self.rows[0]), self.rows)
-
-    def test_current_matrix_has_only_five_series(self):
-        args = SimpleNamespace(suite="current", bodies=[1000, 10000, 100000], threads=[1, 4])
-        cases = configurations_for(args)
-        self.assertEqual(len(cases), 15)
-        self.assertEqual({(name, threads) for _, name, threads in cases}, set(SERIES))
-
-    def test_historical_matrix_unchanged(self):
-        args = SimpleNamespace(suite="historical", bodies=[10000], threads=[1, 4, 8])
-        self.assertEqual(len(configurations_for(args)), 9)
-
-    def test_explicit_skip_omits_only_largest_n2(self):
-        args = SimpleNamespace(suite="current", bodies=[1000, 10000, 100000],
-                               threads=[1, 4], skip_large_n2=True)
-        cases = configurations_for(args)
-        self.assertEqual(len(cases), 14)
-        self.assertNotIn((100000, "n2", 1), cases)
-        self.assertIn((10000, "n2", 1), cases)
 
     def test_plot_accepts_only_explicitly_skipped_point(self):
         self.rows.pop(0)
@@ -93,12 +75,6 @@ class ComparisonTests(unittest.TestCase):
         status["settings"]["skip_large_n2"] = True
         write_json(path, status)
         self.assertEqual(len(load_comparison(self.root)[1]), 4)
-
-    def test_reduced_samples_apply_only_to_largest_n2(self):
-        args = SimpleNamespace(suite="current", bodies=[1000, 10000, 100000],
-                               threads=[1, 4], batch_size=10, large_n2_samples=2)
-        for key in configurations_for(args):
-            self.assertEqual(samples_for(args, key), 2 if key == (100000, "n2", 1) else 10)
 
     def test_plot_accepts_declared_mixed_sample_counts(self):
         path = self.root / "status.json"
@@ -114,7 +90,7 @@ class ComparisonTests(unittest.TestCase):
             info = json.loads((case / "status.json").read_text())
             info["samples"] = 3
             write_json(case / "status.json", info)
-            row.update(summarize([0.01, 0.03, 0.02], 10))
+            row.update(samples=3, stddev_ms_per_step=1)
         self.save_rows()
         _, rows = load_comparison(self.root)
         self.assertEqual([int(row["samples"]) for row in rows], [2, 3, 3, 3, 3])

@@ -263,95 +263,6 @@ retained without separate timers. Confidence intervals describe repeated
 whole-run means of the fixed trajectory; they exclude thermal drift, differences
 between inputs, and instrumentation bias.
 
-### Compare the original and merged implementations
-
-`bench/compare_native.py` compares the current Barnes–Hut implementation with
-original `src` and Rushil sources from commit `25f7df2`, using each one's native
-integrator. It builds isolated executables without changing the working tree.
-Original `src` remains serial and uses Euler; merged and Rushil use leapfrog.
-
-```sh
-# Supply OMPFLAGS/OMPLIBS as above on Apple Clang.
-python3 bench/compare_native.py
-```
-
-Defaults are 10,000/20,000/50,000 bodies, requested thread counts 1/4/8,
-theta 0.5, dt 0.0001, and ten steps. The same seed-42 saved inputs contain
-uniform positions in [-1,1], total mass one, and zero velocities/accelerations.
-Euler uses the supplied acceleration and makes ten force calls; leapfrog
-reinitializes acceleration and makes eleven. Equal theta does not mean equal
-accuracy between the different trees.
-
-Each configuration gets 30 samples in shuffled five-sample batches, with two
-warmups per batch. Configurations with relative standard error above 2% extend
-to 60 samples. Timing covers native integration and forces, including tree work;
-fresh workspace preparation, state resets, validation, and I/O stay outside it.
-Every run validates finite state, masses, and repeatability. Final states must
-also match across thread settings within each implementation. Independent direct
-forces at 128 evenly spaced targets provide an untimed accuracy check.
-
-Results go into a new `results/native-barnes-hut-<timestamp>/` directory with
-executables, build logs, saved inputs, per-batch samples/final states/status,
-`comparison.csv`, and root `status.json`. Samples are whole-run seconds;
-summaries are mean, standard deviation, and median milliseconds per step.
-Use `--machine-description` to attach CPU/core/memory details. A short harness
-check uses `--bodies 129 --steps 3 --samples 2 --max-samples 2 --batch-size 2`.
-
-### Plot current n², Rushil, and src performance
-
-```sh
-# Supply the same OMPFLAGS/OMPLIBS overrides as above on Apple Clang.
-python3 bench/compare_native.py --suite current \
-  --machine-description 'CPU model, core count, memory'
-python3 figures/plot.py results/current-comparison-<timestamp>
-
-# Quick adapter/workflow check before the full experiment:
-python3 bench/compare_native.py --suite current --bodies 129 --steps 3 --samples 2
-```
-
-The current suite builds the actual working-tree sources, including uncommitted
-changes. It measures n² with one thread and both Rushil and src Barnes–Hut with
-one and four threads, at 1,000, 10,000, and 100,000 bodies: 15 configurations.
-Defaults are ten measured runs and two warmups per configuration, ten leapfrog
-steps, dt 0.0001, and theta 0.5. All builds use the same compiler, OpenMP, `-O3`,
-LTO, assertions, and disabled fast-math. The n² force kernel stays serial.
-Rushil retains its native loop and default task cutoff of 256.
-
-Each body count uses one saved seed-42 input, with uniform positions in [-1,1],
-equal masses totaling one, and zero velocities/accelerations. Fresh workspace
-preparation and state reset happen outside timing; native integration, initial
-acceleration, and all tree work happen inside it (eleven force calls per run).
-Configurations run sequentially in a seed-42 shuffled order. Each has one batch;
-there is no automatic sample extension or outlier removal. `--samples`, `--bodies`,
-`--steps`, `--dt`, `--theta`, and `--warmups` can customize the workload; current
-mode requires `--threads 1 4`, with batch size and maximum samples equal to samples.
-The historical suite remains the default when `--suite` is omitted.
-
-For an expensive largest n² point, add `--large-n2-samples 2` to reduce only that
-point to two measured runs, retaining two warmups and ten samples elsewhere.
-An interrupted current-suite run can be continued with
-`python3 bench/compare_native.py --resume results/current-comparison-<timestamp> --large-n2-samples 2`.
-Resume uses saved settings and binaries, revalidates completed points, and keeps
-interrupted attempt logs. Only `--large-n2-samples` and `--skip-large-n2` override
-saved settings; they should target an unfinished point. Use `--skip-large-n2` to omit that
-point entirely; this also works with `--resume`. The figure generator reports
-mixed sample counts or the explicitly skipped point for inclusion in the paper caption. Missing points without an
-explicit skip remain errors. Two samples are the minimum for a sample standard deviation.
-
-Results are saved in a new `results/current-comparison-<timestamp>/` directory,
-with the same binaries, logs, inputs, raw seconds, final states, and status files
-as the native comparison. `comparison.csv` also includes untimed direct-force
-error at up to 128 targets. Equal theta does not guarantee equal accuracy.
-
-The plotter requires Matplotlib and rejects incomplete runs, missing points,
-invalid samples, and summaries inconsistent with raw data. It writes
-`figures/<run-name>-performance.png` using the shared
-paper style. Both axes are logarithmic; markers show mean
-milliseconds per leapfrog step and error bars show one sample standard deviation
-across whole-run averages. Colors identify implementations; solid/dashed lines
-identify one/four threads. Nonpositive lower error-bar endpoints, if any, extend
-below the logarithmic axis and are reported in the terminal for the paper caption.
-
 ## Single-threaded solver sweep
 
 ```sh
@@ -594,8 +505,7 @@ the standalone parallel sweep for both figures and the plotted CSV.
 All figure creation lives in **`figures/plot.py`**. Supply one or more saved data
 paths; all figures are written directly to `figures/`, regardless of the current
 working directory. Benchmark data stays in `results/`. The generator never runs
-benchmarks or changes the source data. It replaces the former `plot_results.py`,
-`bench/plot_comparison.py`, and the experiment-local phase plotting script.
+benchmarks or changes the source data.
 Figure filenames contain only their type, without commit hashes or timestamps.
 Regenerating a type overwrites its previous PNG; raw experiment archives remain
 unchanged in `results/`.
