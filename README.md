@@ -173,16 +173,20 @@ force evaluation count.
 ### Compare grouped Barnes–Hut with REBOUND
 
 Run these commands from the repository root with an OpenMP-capable C toolchain.
-The script builds the pinned REBOUND 5.2.2 C library and both timing drivers,
-checks REBOUND against an independent two-body calculation, and prints the
-result directory under `results/rebound/`.
+The script initializes the REBOUND submodule if needed, builds the pinned
+5.2.2 C library and both timing drivers, and checks REBOUND against an
+independent two-body calculation. Each run prints its directory under
+`results/rebound/`. The first checkout may need network access.
 
 ```sh
-git submodule update --init -- third_party/rebound
+# Tiny end-to-end check: 64 bodies, two steps, two paired samples.
+python3 bench/compare_rebound.py --smoke
+
+# Default benchmark.
 python3 bench/compare_rebound.py
 ```
 
-Both solvers start from the same saved 10,000-body uniform input (seed 42).
+By default both solvers start from the same saved 10,000-body uniform input (seed 42).
 Each takes 20 steps of length 0.0001 on four OpenMP workers. Three pairs run
 sequentially with alternating order, a fresh process per sample and zero warmups.
 The timer covers only the native simulation call. The local solver uses theta

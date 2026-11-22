@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Time six native Barnes–Hut trajectories on one saved 10,000-body instance."""
+"""Compare grouped Barnes–Hut and REBOUND on one saved initial state."""
 
+import argparse
 import csv
 import json
 import math
@@ -15,24 +16,32 @@ from run import (ROOT, create_experiment_directory, driver_metadata, read_state,
 
 GROUPED = "grouped-barnes-hut"
 REBOUND = "rebound"
-THREADS, BODIES, STEPS, PAIRS = 4, 10000, 20, 3
+THREADS = 4
 DT, THETA = 0.0001, 0.5
 GENERATOR = {"distribution": "uniform", "seed": 42, "L": 10, "w-min": 1,
              "w-max": 100, "v-max": 3, "a-max": 0}
 
 
-def build(directory):
+def prepare_rebound(directory):
     submodule = "third_party/rebound"
-    pin = subprocess.check_output(["git", "submodule", "status", "--", submodule],
-                                  cwd=ROOT, text=True)
+    command = ["git", "submodule", "status", "--", submodule]
+    pin = subprocess.check_output(command, cwd=ROOT, text=True)
+    if pin.startswith("-"):
+        if run_logged(["git", "submodule", "update", "--init", "--", submodule],
+                      directory, stdout="submodule.log", stderr=None):
+            raise RuntimeError("Could not initialize REBOUND. See submodule.log")
+        pin = subprocess.check_output(command, cwd=ROOT, text=True)
     if not pin.startswith(" ") or not (ROOT / submodule / "src/rebound.h").is_file():
-        raise RuntimeError("Initialize the pinned source with git submodule update --init -- " + submodule)
+        raise RuntimeError("Expected the pinned REBOUND checkout. Check git submodule status -- " + submodule)
+    return pin.split()[0]
+
+
+def build(directory):
     if run_logged(["make", "-B", "OPENMP=1", "print-config", "rebound-benchmark"],
                   directory, stdout="build.stdout.log", stderr=None):
         raise RuntimeError("Build failed. See build.stdout.log")
     for name in ("bench_grouped_compare", "bench_rebound", "librebound.so"):
         shutil.copy2(ROOT / "build" / name, directory / name)
-    return pin.split()[0]
 
 
 def sample(directory, name, instance, dt, steps, folder):
@@ -92,26 +101,26 @@ def validate_adapter(directory):
         raise ValueError("REBOUND failed the independent two-body drift–kick–drift check")
 
 
-def compare(directory):
+def compare(directory, bodies, steps, pairs):
     instance = directory / "input.txt"
-    command = [sys.executable, ROOT / "generate_instance.py", "--n", BODIES, "--output", instance]
+    command = [sys.executable, ROOT / "generate_instance.py", "--n", bodies, "--output", instance]
     for key, value in GENERATOR.items():
         command.extend(["--" + key, value])
     if run_logged(command, directory, stdout="generation.log", stderr=None):
         raise RuntimeError("Input generation failed. See generation.log")
     initial = read_state(instance)
-    if len(initial) != BODIES:
+    if len(initial) != bodies:
         raise ValueError("Generated input has the wrong number of bodies")
     samples, differences = [], []
-    for pair in range(1, PAIRS + 1):
+    for pair in range(1, pairs + 1):
         states = {}
         order = (GROUPED, REBOUND) if pair % 2 else (REBOUND, GROUPED)
         for name in order:
             folder = directory / f"pair-{pair}-{name}"
-            seconds, calls, states[name] = sample(directory, name, instance, DT, STEPS, folder)
+            seconds, calls, states[name] = sample(directory, name, instance, DT, steps, folder)
             validate_bodies(states[name], initial)
             samples.append({"pair": pair, "solver": name, "seconds": seconds,
-                            "steps": STEPS, "threads": THREADS, "force_evaluations": calls})
+                            "steps": steps, "threads": THREADS, "force_evaluations": calls})
         metrics = trajectory_errors(states[REBOUND], states[GROUPED])
         difference = {"pair": pair}
         for row in metrics:
@@ -122,7 +131,7 @@ def compare(directory):
     summary = []
     for name in (GROUPED, REBOUND):
         durations = [row["seconds"] for row in samples if row["solver"] == name]
-        timing = timing_summary(durations, STEPS)
+        timing = timing_summary(durations, steps)
         summary.append({"solver": name, "samples": timing["samples"],
                         "mean_ms_per_step": 1000 * timing["mean_seconds_per_step"],
                         "stddev_ms_per_step": 1000 * timing["stddev_seconds_per_step"]})
@@ -140,10 +149,15 @@ def compare(directory):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--smoke", action="store_true",
+                        help="run two pairs of two-step trajectories on 64 bodies")
+    args = parser.parse_args()
+    bodies, steps, pairs = (64, 2, 2) if args.smoke else (10000, 20, 3)
     directory = create_experiment_directory(ROOT / "results/rebound")
     print(directory, flush=True)
-    status = {"status": "running", "bodies": BODIES, "steps": STEPS, "dt": DT,
-              "samples_per_solver": PAIRS, "threads": THREADS, "warmups": 0,
+    status = {"status": "running", "bodies": bodies, "steps": steps, "dt": DT,
+              "samples_per_solver": pairs, "threads": THREADS, "warmups": 0,
               "generator": GENERATOR, "theta": THETA, "opening_angle2": 0.25,
               "G": 1, "softening": 0, "rebound_root_size": 32, "collisions": False,
               "integrators": {GROUPED: "kick-drift-kick", REBOUND: "drift-kick-drift"}}
@@ -151,10 +165,11 @@ def main():
     try:
         status["local_revision"] = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
         status["local_dirty"] = bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT))
-        status["rebound_revision"] = build(directory)
+        status["rebound_revision"] = prepare_rebound(directory)
+        build(directory)
         validate_adapter(directory)
         status["two_body_validation"] = "ok"
-        status["rebound_over_grouped_mean_time"] = compare(directory)
+        status["rebound_over_grouped_mean_time"] = compare(directory, bodies, steps, pairs)
         status["status"] = "ok"
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
         status.update(status="failed", error=str(error))

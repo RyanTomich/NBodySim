@@ -6,12 +6,39 @@ import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
+import compare_rebound
 from compare_native import configurations_for, samples_for, summarize
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "figures"))
 from plot import load_comparison, SERIES
 from run import write_csv, write_json
+
+
+class ReboundCheckoutTests(unittest.TestCase):
+    def test_initializes_missing_checkout_and_verifies_pin(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            header = root / "third_party/rebound/src/rebound.h"
+            header.parent.mkdir(parents=True)
+            header.touch()
+            with patch.object(compare_rebound, "ROOT", root), \
+                 patch.object(compare_rebound.subprocess, "check_output",
+                              side_effect=["-abc third_party/rebound", " abc third_party/rebound"]), \
+                 patch.object(compare_rebound, "run_logged", return_value=0) as run:
+                self.assertEqual(compare_rebound.prepare_rebound(root), "abc")
+                run.assert_called_once_with(
+                    ["git", "submodule", "update", "--init", "--", "third_party/rebound"],
+                    root, stdout="submodule.log", stderr=None)
+
+    def test_leaves_different_checkout_in_place(self):
+        with patch.object(compare_rebound.subprocess, "check_output",
+                          return_value="+def third_party/rebound"), \
+             patch.object(compare_rebound, "run_logged") as run:
+            with self.assertRaisesRegex(RuntimeError, "pinned REBOUND"):
+                compare_rebound.prepare_rebound(Path("."))
+            run.assert_not_called()
 
 
 class ComparisonTests(unittest.TestCase):
