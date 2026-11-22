@@ -42,7 +42,7 @@ static void assert_snapshot(const SimulationView *v, const IntegrationCheck *che
 
 /* A position-dependent coupled force. Check the entire callback snapshot before
  * and after writing outputs, including the initial evaluation and half velocities. */
-static void check_step(const SimulationView *v, double *ax, double *ay, double *az, void *context)
+static const char *check_step(const SimulationView *v, double *ax, double *ay, double *az, void *context)
 {
     IntegrationCheck *check = context;
 #ifdef _OPENMP
@@ -75,6 +75,7 @@ static void check_step(const SimulationView *v, double *ax, double *ay, double *
     }
     check->initializing = false;
     ++check->calls;
+    return NULL;
 }
 
 static void check_integration_contract(size_t count)
@@ -95,10 +96,10 @@ static void check_integration_contract(size_t count)
             if (split) {
                 for (size_t i = 0; i < steps; ++i) {
                     check.initializing = true;
-                    simulate_with_solver(s, 0.25, 1, check_step, &check);
+                    assert(!simulate_with_solver(s, 0.25, 1, check_step, &check));
                 }
             } else {
-                simulate_with_solver(s, 0.25, steps, check_step, &check);
+                assert(!simulate_with_solver(s, 0.25, steps, check_step, &check));
             }
             assert(check.calls == (steps == 0 || count == 0 ? 0 : split ? 2 * steps : steps + 1));
             for (size_t i = 0; i < count; ++i) {
@@ -148,8 +149,8 @@ static void test_acceleration_reinitialization(void)
         }
         IntegrationCheck first = {.expected = {body_at(a, 0), body_at(a, 1)}, .count = 2, .initializing = true};
         IntegrationCheck second = {.expected = {body_at(b, 0), body_at(b, 1)}, .count = 2, .initializing = true};
-        simulate_with_solver(a, 0.25, 2, check_step, &first);
-        simulate_with_solver(b, 0.25, 2, check_step, &second);
+        assert(!simulate_with_solver(a, 0.25, 2, check_step, &first));
+        assert(!simulate_with_solver(b, 0.25, 2, check_step, &second));
         assert(first.calls == 3 && second.calls == 3);
         for (size_t i = 0; i < 2; ++i) {
             assert_body(body_at(a, i), first.expected[i], 0);
@@ -191,7 +192,7 @@ static void test_io_contract(void)
         for (size_t steps = 0; steps <= 2; ++steps) {
             Simulation *s = from_bodies(initial, count), *loaded;
             IntegrationCheck check = {.expected = {initial[0], initial[1]}, .count = count, .initializing = true};
-            simulate_with_solver(s, 0.25, steps, check_step, &check);
+            assert(!simulate_with_solver(s, 0.25, steps, check_step, &check));
             FILE *file = tmpfile();
             assert(file && write_bodies(file, s));
             rewind(file);
@@ -202,8 +203,8 @@ static void test_io_contract(void)
             }
             check.initializing = true;
             IntegrationCheck resumed = check;
-            simulate_with_solver(s, 0.25, 1, check_step, &check);
-            simulate_with_solver(loaded, 0.25, 1, check_step, &resumed);
+            assert(!simulate_with_solver(s, 0.25, 1, check_step, &check));
+            assert(!simulate_with_solver(loaded, 0.25, 1, check_step, &resumed));
             for (size_t i = 0; i < count; ++i) {
                 assert_body(body_at(s, i), body_at(loaded, i), 0);
             }
@@ -264,7 +265,7 @@ static void test_invalid_input(void)
     assert(fclose(file) == 0);
 }
 
-static void integrator_force(const SimulationView *state, double *ax, double *ay,
+static const char *integrator_force(const SimulationView *state, double *ax, double *ay,
                              double *az, void *context)
 {
     size_t *calls = context;
@@ -272,23 +273,24 @@ static void integrator_force(const SimulationView *state, double *ax, double *ay
     assert(state->count == 1);
     ax[0] = 4;
     ay[0] = az[0] = 0;
+    return NULL;
 }
 
 static void test_integrator_selection(void)
 {
     const ReferenceBody body = {1, {1, 0, 0}, {2, 0, 0}, {12, 0, 0}};
-    void (*integrators[])(Simulation *, double, size_t, AccelerationSolver, void *) = {
+    const char *(*integrators[])(Simulation *, double, size_t, AccelerationSolver, void *) = {
         simulate_with_solver, simulate_leapfrog_with_solver, simulate_euler_with_solver
     };
     for (size_t i = 0; i < sizeof(integrators) / sizeof(integrators[0]); ++i) {
         size_t calls = 0;
         Simulation *state = from_bodies(&body, 1);
         Simulation *empty = from_bodies(NULL, 0);
-        integrators[i](empty, 0.5, 2, integrator_force, &calls);
-        integrators[i](state, 0.5, 0, integrator_force, &calls);
+        assert(!integrators[i](empty, 0.5, 2, integrator_force, &calls));
+        assert(!integrators[i](state, 0.5, 0, integrator_force, &calls));
         assert(calls == 0);
         assert_body(body_at(state, 0), body, 0);
-        integrators[i](state, 0.5, 1, integrator_force, &calls);
+        assert(!integrators[i](state, 0.5, 1, integrator_force, &calls));
         const bool euler = i == 2;
         assert(calls == (euler ? 1u : 2u));
         assert_body(body_at(state, 0),
@@ -299,10 +301,49 @@ static void test_integrator_selection(void)
     }
 }
 
+static const char force_error[] = "force evaluation failed";
+
+static const char *fail_second_force(const SimulationView *state, double *ax, double *ay,
+                                     double *az, void *context)
+{
+    size_t *calls = context;
+    if (++*calls == 2) {
+        ax[0] = 999;
+        return force_error;
+    }
+    assert(state->count == 1);
+    ax[0] = 2;
+    ay[0] = 4;
+    az[0] = 6;
+    return NULL;
+}
+
+static void test_partial_force_is_discarded(void)
+{
+    for (int euler = 0; euler <= 1; ++euler) {
+        ReferenceBody body = {1, {0}, {0}, {0}};
+        Simulation *state = from_bodies(&body, 1);
+        size_t calls = 0;
+        const char *error = (euler ? simulate_euler_with_solver : simulate_with_solver)
+                            (state, 1, 4, fail_second_force, &calls);
+        assert(error == force_error && calls == 2);
+        /* Leapfrog stopped after the drift and before its second half-kick.
+         * Euler reached its second position and velocity update. */
+        ReferenceBody expected = {1, {1, 2, 3}, {1, 2, 3}, {2, 4, 6}};
+        if (euler) {
+            expected.position = (Vec3){0};
+            expected.velocity = (Vec3){2, 4, 6};
+        }
+        assert_body(body_at(state, 0), expected, 0);
+        simulation_destroy(state);
+    }
+}
+
 void test_state(void)
 {
     test_integration_contract();
     test_integrator_selection();
+    test_partial_force_is_discarded();
     test_acceleration_reinitialization();
     test_state_lifecycle();
     test_io_contract();

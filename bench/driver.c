@@ -280,7 +280,11 @@ int main(int argc, char **argv)
     metadata_log(stderr, &solver, false);
     for (size_t i = 0; i < warmups; ++i) {
         reset_state(simulation, initial);
-        integrate(simulation, dt, steps, solver.acceleration, solver.context);
+        error = integrate(simulation, dt, steps, solver.acceleration, solver.context);
+        if (error) {
+            fprintf(stderr, "%s\n", error);
+            goto cleanup;
+        }
         if (!state_is_finite(simulation_view(simulation))) {
             fprintf(stderr, "Warmup produced a nonfinite state.\n");
             goto cleanup;
@@ -302,7 +306,7 @@ int main(int argc, char **argv)
             }
         }
 
-        integrate(simulation, dt, steps, solver.acceleration, solver.context);
+        error = integrate(simulation, dt, steps, solver.acceleration, solver.context);
 
         if (timing) {
             if (clock_gettime(CLOCK_MONOTONIC, &end) != 0) {
@@ -311,6 +315,10 @@ int main(int argc, char **argv)
             }
             durations[i] = (double)(end.tv_sec - start.tv_sec)
                 + (double)(end.tv_nsec - start.tv_nsec) * 1e-9;
+        }
+        if (error) {
+            fprintf(stderr, "%s\n", error);
+            goto cleanup;
         }
 #ifdef NBODY_BENCH_STEPS
         if (step_clock_failed) {

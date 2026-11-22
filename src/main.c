@@ -87,8 +87,13 @@ int main(int argc, char **argv)
         simulation_destroy(simulation);
         return EXIT_FAILURE;
     }
-    integrate(simulation, dt, steps, solver.acceleration, solver.context);
+    error = integrate(simulation, dt, steps, solver.acceleration, solver.context);
     solver_destroy(&solver);
+    if (error) {
+        fprintf(stderr, "%s\n", error);
+        simulation_destroy(simulation);
+        return EXIT_FAILURE;
+    }
     bool written = write_bodies(stdout, simulation);
     simulation_destroy(simulation);
     if (!written || fflush(stdout) != 0) {

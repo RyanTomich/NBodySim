@@ -2,7 +2,7 @@
 #ifndef LAPLACE_ORDER4_INTERNAL_H
 #define LAPLACE_ORDER4_INTERNAL_H
 
-const CartesianTerm laplace_terms[LAPLACE_TERMS] = {
+static const CartesianTerm laplace_terms[LAPLACE_TERMS] = {
     {{0, 0, 0}, {-1, -1, -1}},
     {{0, 0, 1}, {-1, -1, 0}},
     {{0, 1, 0}, {-1, 0, -1}},
@@ -40,7 +40,7 @@ const CartesianTerm laplace_terms[LAPLACE_TERMS] = {
     {{4, 0, 0}, {19, -1, -1}},
 };
 
-const CartesianSplit laplace_splits[LAPLACE_SPLITS] = {
+static const CartesianSplit laplace_splits[LAPLACE_SPLITS] = {
     {0, 0, 0, 1, 1},
     {1, 0, 1, 1, 1},
     {1, 1, 0, 1, 2},

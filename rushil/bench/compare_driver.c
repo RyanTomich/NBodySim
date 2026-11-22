@@ -32,7 +32,11 @@ static void evaluate(Simulation *state
 #else
     SimulationView view=simulation_view(state);
     MutableSimulationView out=simulation_mutable_view(state);
-    solver->acceleration(&view,out.ax,out.ay,out.az,solver->context);
+    const char *error = solver->acceleration(&view, out.ax, out.ay, out.az, solver->context);
+    if (error) {
+        fprintf(stderr, "%s\n", error);
+        exit(EXIT_FAILURE);
+    }
 #endif
 }
 

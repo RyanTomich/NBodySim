@@ -15,12 +15,12 @@ def generate():
 #ifndef LAPLACE_ORDER4_INTERNAL_H
 #define LAPLACE_ORDER4_INTERNAL_H
 
-const CartesianTerm laplace_terms[LAPLACE_TERMS] = {""")
+static const CartesianTerm laplace_terms[LAPLACE_TERMS] = {""")
     for term in terms:
         lower = [index[tuple(value - (i == axis) for i, value in enumerate(term))]
                  if term[axis] else -1 for axis in range(3)]
         print("    {{%d, %d, %d}, {%d, %d, %d}}," % (*term, *lower))
-    print("};\n\nconst CartesianSplit laplace_splits[LAPLACE_SPLITS] = {")
+    print("};\n\nstatic const CartesianSplit laplace_splits[LAPLACE_SPLITS] = {")
     for a, term in enumerate(terms):
         for child in product(*(range(exponent + 1) for exponent in term)):
             offset = tuple(n - k for n, k in zip(term, child))

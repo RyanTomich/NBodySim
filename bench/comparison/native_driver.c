@@ -184,8 +184,10 @@ int main(int argc, char **argv)
             for (size_t s = 0; s < steps; ++s) {
                 (void)step(dt);
             }
-#else
+#elif defined(ORIGINAL_SRC)
             simulate_with_solver(state, dt, steps, solver.acceleration, solver.context);
+#else
+            error = simulate_with_solver(state, dt, steps, solver.acceleration, solver.context);
 #endif
             timed = clock_gettime(CLOCK_MONOTONIC, &end) == 0;
         }
@@ -195,6 +197,12 @@ int main(int argc, char **argv)
         nodes = 0;
 #else
         solver_destroy(&solver);
+#ifndef ORIGINAL_SRC
+        if (error) {
+            fprintf(stderr, "%s\n", error);
+            goto cleanup;
+        }
+#endif
 #endif
         if (!timed) {
             perror("clock_gettime");

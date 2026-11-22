@@ -20,12 +20,12 @@ static void advance_state(size_t count, double dt,
     }
 }
 
-void simulate_euler_with_solver(Simulation *simulation, double dt, size_t steps,
-                                AccelerationSolver solver, void *context)
+const char *simulate_euler_with_solver(Simulation *simulation, double dt, size_t steps,
+                                       AccelerationSolver solver, void *context)
 {
     const size_t count = simulation->count;
     if (steps == 0 || count == 0) {
-        return;
+        return NULL;
     }
 #ifdef NBODY_BENCH_STEPS
     benchmark_step_boundary(0);
@@ -35,22 +35,13 @@ void simulate_euler_with_solver(Simulation *simulation, double dt, size_t steps,
                       simulation->vx, simulation->vy, simulation->vz,
                       simulation->ax, simulation->ay, simulation->az);
 
-        const SimulationView state = simulation_view(simulation);
-        solver(&state, simulation->next_ax, simulation->next_ay,
-               simulation->next_az, context);
-
-        /* Publish new accelerations only after every interaction has read state. */
-        double *previous_ax = simulation->ax;
-        double *previous_ay = simulation->ay;
-        double *previous_az = simulation->az;
-        simulation->ax = simulation->next_ax;
-        simulation->ay = simulation->next_ay;
-        simulation->az = simulation->next_az;
-        simulation->next_ax = previous_ax;
-        simulation->next_ay = previous_ay;
-        simulation->next_az = previous_az;
+        const char *error = refresh_acceleration(simulation, solver, context);
+        if (error) {
+            return error;
+        }
 #ifdef NBODY_BENCH_STEPS
         benchmark_step_boundary(step + 1);
 #endif
     }
+    return NULL;
 }

@@ -1,4 +1,4 @@
-#include "n2_internal.h"
+#include "gravity_internal.h"
 #include "solver_internal.h"
 
 #include <assert.h>
@@ -65,8 +65,8 @@ static inline void evaluate_row(const SimulationView *state, size_t i,
     az[i] = sum_z;
 }
 
-void n2_accelerations(const SimulationView *state, double *restrict ax,
-                     double *restrict ay, double *restrict az)
+void n2_accelerations_serial(const SimulationView *state, double *restrict ax,
+                             double *restrict ay, double *restrict az)
 {
     const size_t count = state->count;
     if (count == 0) {
@@ -81,7 +81,6 @@ void n2_accelerations(const SimulationView *state, double *restrict ax,
     }
 }
 
-/* The serial kernel above is also used directly by FMM fallbacks. */
 #ifdef _OPENMP
 static void evaluate_parallel(const SimulationView *state, double *ax, double *ay,
                               double *az, N2Workspace *workspace)
@@ -92,7 +91,7 @@ static void evaluate_parallel(const SimulationView *state, double *ax, double *a
     {
         const int team_size = omp_get_num_threads();
         if (team_size == 1) {
-            n2_accelerations(state, ax, ay, az);
+            n2_accelerations_serial(state, ax, ay, az);
         } else {
             double *local_ax = workspace->scratch + (size_t)omp_get_thread_num() * worker_stride;
             double *local_ay = local_ax + count;
@@ -124,18 +123,19 @@ static void evaluate_parallel(const SimulationView *state, double *ax, double *a
 }
 #endif
 
-static void evaluate(const SimulationView *state, double *ax, double *ay,
-                     double *az, void *solver_context)
+static const char *evaluate(const SimulationView *state, double *ax, double *ay,
+                            double *az, void *solver_context)
 {
     N2Workspace *workspace = solver_context;
     assert(workspace && workspace->count == state->count);
 #ifdef _OPENMP
     if (workspace->scratch) {
         evaluate_parallel(state, ax, ay, az, workspace);
-        return;
+        return NULL;
     }
 #endif
-    n2_accelerations(state, ax, ay, az);
+    n2_accelerations_serial(state, ax, ay, az);
+    return NULL;
 }
 
 static void destroy(void *solver_context)

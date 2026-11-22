@@ -54,3 +54,25 @@ MutableSimulationView simulation_mutable_view(Simulation *simulation)
         simulation->ax, simulation->ay, simulation->az
     };
 }
+
+const char *refresh_acceleration(Simulation *simulation, AccelerationSolver solver, void *context)
+{
+    const SimulationView state = simulation_view(simulation);
+    const char *error = solver(&state, simulation->next_ax, simulation->next_ay,
+                               simulation->next_az, context);
+    if (error) {
+        return error;
+    }
+
+    /* Publish only after every interaction has read the whole input state. */
+    double *previous_ax = simulation->ax;
+    double *previous_ay = simulation->ay;
+    double *previous_az = simulation->az;
+    simulation->ax = simulation->next_ax;
+    simulation->ay = simulation->next_ay;
+    simulation->az = simulation->next_az;
+    simulation->next_ax = previous_ax;
+    simulation->next_ay = previous_ay;
+    simulation->next_az = previous_az;
+    return NULL;
+}

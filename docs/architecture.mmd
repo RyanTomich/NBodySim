@@ -9,19 +9,15 @@ flowchart TD
     CB --> PB["parallel_barnes_hut.c — independent particle walks"]
     CB --> GB["grouped_barnes_hut.c — shared leaf traversal"]
     CB --> F["fmm.c — fast multipole solver"]
-    F -. fallback .-> N2
-    SB -. fallback .-> N2
-    PB -. fallback .-> N2
     SB --> G["gravity.c — direct particle interactions"]
     GB --> G
     F --> G
     SB --> O["octree.c — bounded spatial hierarchy"]
     GB --> O
     F --> O
-    F --> L["laplace.c — expansion tables and translation"]
-    L --> GEN["generated/laplace_order4_internal.h — unrolled order-4 translation"]
+    F --> GEN["generated/laplace_order4_internal.h — unrolled order-4 translation"]
 
 %% Leapfrog refreshes initial acceleration. Euler starts with the supplied
 %% acceleration. Both evaluate forces once per step. Publish acceleration after
-%% the whole callback; return full-step velocities and final-position forces.
+%% a successful callback; return full-step velocities and final-position forces.
 %% Empty or zero-step calls preserve state and invoke no solver.

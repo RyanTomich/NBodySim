@@ -3,7 +3,7 @@
 
 #include "nbody.h"
 
-typedef void (*Integrate)(Simulation *, double, size_t, AccelerationSolver, void *);
+typedef const char *(*Integrate)(Simulation *, double, size_t, AccelerationSolver, void *);
 /* NULL selects the default. Unknown names give a null function pointer. */
 Integrate parse_integrator(const char *name);
 

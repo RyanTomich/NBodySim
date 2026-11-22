@@ -110,13 +110,18 @@ static void test_configuration_contract(void)
 
 enum { CLOUD_SIZE = 129, FORCE_CHECK_CAPACITY = 1000 };
 
-static void fill_cloud(ReferenceBody *bodies)
+static void fill_distinct_cloud(ReferenceBody *bodies)
 {
     for (size_t i = 0; i < CLOUD_SIZE; ++i) {
         bodies[i] = (ReferenceBody){1 + (double)(i % 3),
             {(i % 2 ? -10 : 10) + 0.125 * (double)(i % 7),
              0.25 * (double)(i % 11), 0.25 * (double)(i % 13)}, {0}, {0}};
     }
+}
+
+static void fill_cloud(ReferenceBody *bodies)
+{
+    fill_distinct_cloud(bodies);
     bodies[2].position = bodies[1].position; /* Unequal masses, coincident positions. */
 }
 
@@ -133,7 +138,7 @@ static Simulation *check_force(Solver *solver, const ReferenceBody *bodies, size
         ax[i] = ay[i] = az[i] = NAN;
     }
     ax[0] = ay[0] = az[0] = ax[count + 1] = ay[count + 1] = az[count + 1] = 12345;
-    solver->acceleration(&view, ax + 1, ay + 1, az + 1, solver->context);
+    assert(!solver->acceleration(&view, ax + 1, ay + 1, az + 1, solver->context));
     double error = 0, norm = 0;
     for (size_t i = 0; i < count; ++i) {
         assert(isfinite(ax[i + 1]) && isfinite(ay[i + 1]) && isfinite(az[i + 1]));
@@ -146,6 +151,21 @@ static Simulation *check_force(Solver *solver, const ReferenceBody *bodies, size
     assert(ax[0] == 12345 && ay[0] == 12345 && az[0] == 12345);
     assert(ax[count + 1] == 12345 && ay[count + 1] == 12345 && az[count + 1] == 12345);
     return s;
+}
+
+static void check_force_error(Solver *solver, const ReferenceBody *bodies, size_t count,
+                              const char *reason)
+{
+    assert(count <= FORCE_CHECK_CAPACITY);
+    Simulation *state = from_bodies(bodies, count);
+    SimulationView view = simulation_view(state);
+    double ax[FORCE_CHECK_CAPACITY], ay[FORCE_CHECK_CAPACITY], az[FORCE_CHECK_CAPACITY];
+    const char *error = solver->acceleration(&view, ax, ay, az, solver->context);
+    assert(error && strstr(error, reason));
+    for (size_t i = 0; i < count; ++i) {
+        assert_body(body_at(state, i), bodies[i], 0);
+    }
+    simulation_destroy(state);
 }
 
 static void test_barnes_hut_backends_against_direct(void)
@@ -166,13 +186,20 @@ static void test_barnes_hut_backends_against_direct(void)
         Solver solver;
         assert(solver_create(&solver, names[backend], FORCE_CHECK_CAPACITY, options, 1, &error));
         simulation_destroy(check_force(&solver, bodies, FORCE_CHECK_CAPACITY, 1e-11));
-        bodies[1].position = bodies[0].position;
+        bool particle_tree = strcmp(names[backend], "parallel-barnes-hut") == 0;
+        if (!particle_tree) {
+            bodies[1].position = bodies[0].position;
+        }
         bodies[2].position.x += 20;
         bodies[2].w *= 2;
         simulation_destroy(check_force(&solver, bodies, FORCE_CHECK_CAPACITY, 1e-11));
         solver_destroy(&solver);
         assert(solver_create(&solver, names[backend], FORCE_CHECK_CAPACITY, options, 2, &error));
-        simulation_destroy(check_force(&solver, bodies, FORCE_CHECK_CAPACITY, 1e-11));
+        if (particle_tree) {
+            check_force_error(&solver, bodies, FORCE_CHECK_CAPACITY, "node capacity");
+        } else {
+            simulation_destroy(check_force(&solver, bodies, FORCE_CHECK_CAPACITY, 1e-11));
+        }
         solver_destroy(&solver);
     }
 }
@@ -203,10 +230,16 @@ static void test_registered_solver_contract(void)
         }
         for (size_t count = 0; count <= 3; ++count) {
             fprintf(stderr, "solver contract: %s, count=%zu\n", name, count);
-            fill_cloud(bodies);
+            bool particle_tree = strcmp(name, "parallel-barnes-hut") == 0;
+            if (particle_tree) {
+                fill_distinct_cloud(bodies);
+            } else {
+                fill_cloud(bodies);
+            }
+            SolverOption exact = {"theta", "0"};
             Solver solver;
             const char *error;
-            assert(solver_create(&solver, name, count, NULL, 0, &error));
+            assert(solver_create(&solver, name, count, &exact, particle_tree, &error));
             Simulation *previous = check_force(&solver, bodies, count, 1e-11);
             /* Keep the first allocation alive: reuse must not read cached state. */
             ReferenceBody before[3];
@@ -215,7 +248,11 @@ static void test_registered_solver_contract(void)
                 bodies[i].w *= 2;
                 bodies[i].position = (Vec3){100, -10, 3};
             }
-            simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            if (count > 1 && particle_tree) {
+                check_force_error(&solver, bodies, count, "parallel-barnes-hut:");
+            } else {
+                simulation_destroy(check_force(&solver, bodies, count, 1e-11));
+            }
             for (size_t i = 0; i < count; ++i) {
                 assert_body(body_at(previous, i), before[i], 0);
             }
@@ -294,12 +331,9 @@ static void test_barnes_hut_nonfinite_reuse(void)
         coordinates[axis][2] = invalid[axis];
         SimulationView view = simulation_view(state);
         double acceleration[3][3];
-        solver.acceleration(&view, acceleration[0], acceleration[1], acceleration[2], solver.context);
-        for (size_t component = 0; component < 3; ++component) {
-            for (size_t i = 0; i < 3; ++i) {
-                assert(isnan(acceleration[component][i]));
-            }
-        }
+        error = solver.acceleration(&view, acceleration[0], acceleration[1], acceleration[2],
+                                    solver.context);
+        assert(error && strstr(error, "tree bounds"));
         coordinates[axis][2] = 1;
         simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
     }
@@ -331,7 +365,7 @@ static void test_fmm_approximates_separated_groups(void)
     Simulation *state = from_bodies(bodies, COUNT);
     SimulationView view = simulation_view(state);
     double ax[COUNT], ay[COUNT], az[COUNT];
-    solver.acceleration(&view, ax, ay, az, solver.context);
+    assert(!solver.acceleration(&view, ax, ay, az, solver.context));
 
     /* Coincident bodies contribute zero. The other group's field is
      * approximated, so the error should exceed direct-sum rounding. */
@@ -544,12 +578,12 @@ static void test_fmm_thread_consistency(void)
                 omp_set_num_threads(threads[team]);
                 states[team] = from_bodies(bodies, count);
                 SimulationView view = simulation_view(states[team]);
-                solver.acceleration(&view, actual[team][0], actual[team][1], actual[team][2],
-                                    solver.context);
+                assert(!solver.acceleration(&view, actual[team][0], actual[team][1], actual[team][2],
+                                            solver.context));
                 for (size_t i = 0; i < count; ++i) {
                     assert_body(body_at(states[team], i), bodies[i], 0);
                 }
-                simulate_with_solver(states[team], 0.00001, 2, solver.acceleration, solver.context);
+                assert(!simulate_with_solver(states[team], 0.00001, 2, solver.acceleration, solver.context));
             }
             double error_norm = 0, reference_norm = 0;
             for (size_t i = 0; i < count; ++i) {
@@ -574,16 +608,13 @@ static void test_fmm_thread_consistency(void)
                 simulation_destroy(states[team]);
             }
         }
-        MetadataCheck fallback = {.name = "direct_fallbacks"};
-        solver_diagnostics(&solver, find_metadata, &fallback);
-        assert(fallback.found && fallback.value.value.size == 0);
         solver_destroy(&solver);
     }
     omp_set_num_threads(saved_threads);
     omp_set_dynamic(saved_dynamic);
 }
 
-static void test_fmm_parallel_fallback(void)
+static void test_fmm_parallel_interaction_failure(void)
 {
     enum { COUNT = 1024 };
     ReferenceBody bodies[COUNT];
@@ -605,29 +636,23 @@ static void test_fmm_parallel_fallback(void)
         Simulation *state = from_bodies(bodies, COUNT);
         SimulationView view = simulation_view(state);
         double actual[3][COUNT], expected[3][COUNT];
-        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
-        omp_set_num_threads(1);
-        /* Failed calls match direct summation; recovery matches a fresh
-         * serial FMM, including its approximation error. */
-        Solver reference;
-        assert(solver_create(&reference, run ? "fmm" : "n2", COUNT,
-                             NULL, 0, &error));
-        reference.acceleration(&view, expected[0], expected[1], expected[2], reference.context);
-        solver_destroy(&reference);
-        omp_set_num_threads(12);
-        for (size_t axis = 0; axis < 3; ++axis) {
-            for (size_t i = 0; i < COUNT; ++i) {
-                if (!run) {
-                    assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
-                           || actual[axis][i] == expected[axis][i]);
-                } else {
+        error = solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+        if (run == 0) {
+            assert(error && strstr(error, "interaction pass"));
+        } else {
+            assert(!error);
+            omp_set_num_threads(1);
+            Solver reference;
+            assert(solver_create(&reference, "fmm", COUNT, NULL, 0, &error));
+            assert(!reference.acceleration(&view, expected[0], expected[1], expected[2],
+                                           reference.context));
+            solver_destroy(&reference);
+            for (size_t axis = 0; axis < 3; ++axis) {
+                for (size_t i = 0; i < COUNT; ++i) {
                     assert_close(actual[axis][i], expected[axis][i], 0);
                 }
             }
         }
-        MetadataCheck fallback = {.name = "direct_fallbacks"};
-        solver_diagnostics(&solver, find_metadata, &fallback);
-        assert(fallback.found && fallback.value.value.size == 1);
         simulation_destroy(state);
     }
     solver_destroy(&solver);
@@ -664,7 +689,7 @@ static void test_n2_thread_consistency(void)
                 Simulation *state = check_force(&solvers[team], bodies, count, 1e-11);
                 SimulationView view = simulation_view(state);
                 double actual[3][CLOUD_SIZE];
-                solvers[team].acceleration(&view, actual[0], actual[1], actual[2], solvers[team].context);
+                assert(!solvers[team].acceleration(&view, actual[0], actual[1], actual[2], solvers[team].context));
                 for (size_t i = 0; i < count; ++i) {
                     assert_close(actual[0][i], expected[i].x, 1e-11);
                     assert_close(actual[1][i], expected[i].y, 1e-11);
@@ -730,8 +755,8 @@ static void test_trajectory_thread_consistency(void)
             assert(solver_create(&solver, names[backend], CLOUD_SIZE,
                                 &theta, backend == 1, &error));
             for (size_t run = 0; run < 2; ++run) {
-                simulate_with_solver(states[team], 0.0001, 5,
-                                     solver.acceleration, solver.context);
+                assert(!simulate_with_solver(states[team], 0.0001, 5,
+                                             solver.acceleration, solver.context));
             }
             solver_destroy(&solver);
         }
@@ -753,7 +778,7 @@ static void test_barnes_hut_thread_consistency(void)
     omp_set_dynamic(0);
     omp_set_max_active_levels(1);
     ReferenceBody bodies[CLOUD_SIZE];
-    fill_cloud(bodies);
+    fill_distinct_cloud(bodies);
     Simulation *state = from_bodies(bodies, CLOUD_SIZE);
     SimulationView view = simulation_view(state);
     const char *thetas[] = {"0", "0.8"};
@@ -788,18 +813,18 @@ static void test_barnes_hut_thread_consistency(void)
          * serializes, so stale statistics from inactive workers must be ignored. */
         for (size_t repeat = 0; repeat < 3; ++repeat) {
             omp_set_num_threads(4);
-            solvers[0].acceleration(&view, expected[0], expected[1], expected[2], solvers[0].context);
+            assert(!solvers[0].acceleration(&view, expected[0], expected[1], expected[2], solvers[0].context));
             omp_set_num_threads(1);
             if (repeat == 1) {
 #pragma omp parallel num_threads(2) default(none) shared(solvers, view, actual)
                 {
 #pragma omp single
                     {
-                        solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context);
+                        assert(!solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context));
                     }
                 }
             } else {
-                solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context);
+                assert(!solvers[1].acceleration(&view, actual[0], actual[1], actual[2], solvers[1].context));
             }
             for (size_t axis = 0; axis < 3; ++axis) {
                 for (size_t i = 0; i < CLOUD_SIZE; ++i) {
@@ -880,7 +905,7 @@ static void test_barnes_hut_monopole_acceleration(void)
             Vec3 expected[4];
             double actual[3][4];
             reference_accelerations(bodies, 4, expected);
-            solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+            assert(!solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context));
             MetadataCheck aggregates = {.name = "aggregate_evaluations"};
             solver_diagnostics(&solver, find_metadata, &aggregates);
             assert(aggregates.found && aggregates.value.type == METADATA_SIZE);
@@ -908,7 +933,7 @@ static void test_barnes_hut_monopole_acceleration(void)
     solver_destroy(&solver);
 }
 
-static void test_barnes_hut_unrepresentable_tree(void)
+static void test_unrepresentable_tree(void)
 {
     const ReferenceBody cases[][3] = {
         {{1e308, {0, 0, 0}, {0}, {0}},
@@ -923,113 +948,50 @@ static void test_barnes_hut_unrepresentable_tree(void)
                                 {3, {2e100, 0, 0}, {0}, {0}}};
     Solver solver;
     const char *error;
-    assert(solver_create(&solver, "grouped-barnes-hut", 3, NULL, 0, &error));
-    simulation_destroy(check_force(&solver, ordinary, 3, 1e-11));
-    for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
-        MetadataCheck contributions[] = {
-            {.name = "direct_evaluations"}, {.name = "aggregate_evaluations"}
-        };
-        for (size_t field = 0; field < 2; ++field) {
-            solver_diagnostics(&solver, find_metadata, &contributions[field]);
-            assert(contributions[field].found && contributions[field].value.type == METADATA_SIZE);
-        }
-        Simulation *state = from_bodies(cases[c], 3);
-        SimulationView view = simulation_view(state);
-        double actual[3][3] = {{0}};
-        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
-        for (size_t axis = 0; axis < 3; ++axis) {
-            for (size_t i = 0; i < 3; ++i) {
-                assert(isnan(actual[axis][i]));
-            }
-        }
-        for (size_t i = 0; i < 3; ++i) {
-            assert_body(body_at(state, i), cases[c][i], 0);
-        }
-        /* A failed call must not recount contributions from the previous call. */
-        for (size_t field = 0; field < 2; ++field) {
-            MetadataCheck after = {.name = contributions[field].name};
-            solver_diagnostics(&solver, find_metadata, &after);
-            assert(after.found && after.value.type == METADATA_SIZE);
-            assert(after.value.value.size == contributions[field].value.value.size);
-        }
-        simulation_destroy(state);
-        /* Recover after both an invalid summary on reused topology and a
-         * failed rebuild, without recreating the solver. */
-        simulation_destroy(check_force(&solver, ordinary, 3, 1e-11));
-    }
-    MetadataCheck calls = {.name = "calls"};
-    solver_diagnostics(&solver, find_metadata, &calls);
-    assert(calls.found && calls.value.type == METADATA_SIZE && calls.value.value.size == 5);
+    /* The pairwise forces remain representable even when total mass overflows. */
+    assert(solver_create(&solver, "n2", 3, NULL, 0, &error));
+    simulation_destroy(check_force(&solver, cases[0], 3, 1e-11));
     solver_destroy(&solver);
-}
 
-static void test_fmm_fallback_contract(void)
-{
-    /* Overflow in aggregate mass must fall back to direct evaluation and recover
-     * on a later ordinary call. All expected accelerations remain representable. */
-    ReferenceBody bodies[] = {{1e308, {0,0,0}, {0}, {0}},
-                             {1e308, {1e100,0,0}, {0}, {0}},
-                             {1e308, {2e100,0,0}, {0}, {0}}};
-    Solver solver;
-    const char *error;
-    assert(solver_create(&solver, "fmm", 3, NULL, 0, &error));
-    for (size_t i = 0; i < 3; ++i) {
-        bodies[i].w = 1;
-    }
-    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
-    for (size_t i = 0; i < 3; ++i) {
-        bodies[i].w = 1e308;
-    }
-    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
-    MetadataCheck fallback = {.name = "direct_fallbacks"};
-    solver_diagnostics(&solver, find_metadata, &fallback);
-    assert(fallback.found && fallback.value.type == METADATA_SIZE && fallback.value.value.size == 1);
-    /* Recover at the same positions. */
-    for (size_t i = 0; i < 3; ++i) {
-        bodies[i].w = 1;
-    }
-    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
-    /* Unrepresentable bounds retain the n2 solver's overflow behavior. */
-    bodies[0].position.x = -1e308;
-    bodies[1].position.x = 0;
-    bodies[2].position.x = 1e308;
-    for (size_t i = 0; i < 3; ++i) {
-        bodies[i].w = 1;
-    }
-    Simulation *state = from_bodies(bodies, 3);
-    SimulationView view = simulation_view(state);
-    Solver n2;
-    assert(solver_create(&n2, "n2", 3, NULL, 0, &error));
-    double actual[3][3], expected[3][3];
-    solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
-    n2.acceleration(&view, expected[0], expected[1], expected[2], n2.context);
-    for (size_t axis = 0; axis < 3; ++axis) {
-        for (size_t i = 0; i < 3; ++i) {
-            assert((isnan(actual[axis][i]) && isnan(expected[axis][i]))
-                   || actual[axis][i] == expected[axis][i]);
+    for (size_t i = 0; i < solver_count(); ++i) {
+        const char *name = solver_name_at(i);
+        if (strcmp(name, "n2") == 0) {
+            continue;
         }
+        assert(solver_create(&solver, name, 3, NULL, 0, &error));
+        simulation_destroy(check_force(&solver, ordinary, 3, 1e-11));
+        const char *reasons[] = {strcmp(name, "fmm") == 0 ? "upward pass" : "mass summary",
+                                 "tree bounds"};
+        for (size_t c = 0; c < 2; ++c) {
+            MetadataCheck before[] = {{.name = "direct_evaluations"},
+                                      {.name = "aggregate_evaluations"}};
+            for (size_t k = 0; k < 2; ++k) {
+                solver_diagnostics(&solver, find_metadata, &before[k]);
+            }
+            check_force_error(&solver, cases[c], 3, reasons[c]);
+            for (size_t k = 0; k < 2; ++k) {
+                if (before[k].found) {
+                    MetadataCheck after = {.name = before[k].name};
+                    solver_diagnostics(&solver, find_metadata, &after);
+                    assert(after.found && after.value.value.size == before[k].value.value.size);
+                }
+            }
+            simulation_destroy(check_force(&solver, ordinary, 3, 1e-11));
+        }
+        MetadataCheck calls = {.name = "calls"};
+        solver_diagnostics(&solver, find_metadata, &calls);
+        if (strcmp(name, "fmm") != 0) {
+            assert(calls.found && calls.value.value.size == 5);
+        }
+        solver_destroy(&solver);
     }
-    MetadataCheck bounds = {.name = "direct_fallbacks"};
-    solver_diagnostics(&solver, find_metadata, &bounds);
-    assert(bounds.found && bounds.value.type == METADATA_SIZE && bounds.value.value.size == 2);
-    solver_destroy(&n2);
-    simulation_destroy(state);
-    for (size_t i = 0; i < 3; ++i) {
-        bodies[i].w = i + 1;
-        bodies[i].position.x = (double)i;
-    }
-    simulation_destroy(check_force(&solver, bodies, 3, 1e-11));
-    fallback.found = false;
-    solver_diagnostics(&solver, find_metadata, &fallback);
-    assert(fallback.found && fallback.value.value.size == 2);
-    solver_destroy(&solver);
 }
 
 #ifdef _OPENMP
 static void test_parallel_barnes_hut(void)
 {
     ReferenceBody bodies[CLOUD_SIZE];
-    fill_cloud(bodies);
+    fill_distinct_cloud(bodies);
     const char *error;
     Solver solver;
     SolverOption exact = {"theta", "0"};
@@ -1041,19 +1003,22 @@ static void test_parallel_barnes_hut(void)
     }
     simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
     solver_destroy(&solver);
-    /* Coincidence, depth limits, and capacity pressure must preserve all bodies. */
-    bodies[1].position = bodies[0].position;
-    SolverOption fallbacks[] = {{"node_capacity", "1"}, {"max_depth", "0"}};
+    SolverOption limits[] = {{"node_capacity", "1"}, {"max_depth", "0"}};
+    const char *reasons[] = {"node capacity", "depth limit"};
     for (size_t k = 0; k < 2; ++k) {
-        assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, &fallbacks[k], 1, &error));
-        simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
+        assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, &limits[k], 1, &error));
+        check_force_error(&solver, bodies, CLOUD_SIZE, reasons[k]);
         solver_destroy(&solver);
     }
     assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, NULL, 0, &error));
-    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 1e-11));
+    Vec3 saved = bodies[1].position;
+    bodies[1].position = bodies[0].position;
+    check_force_error(&solver, bodies, CLOUD_SIZE, "depth limit");
+    bodies[1].position = saved;
+    simulation_destroy(check_force(&solver, bodies, CLOUD_SIZE, 0.02));
     solver_destroy(&solver);
     /* Task summaries and target walks must give identical results at 1/2/4 threads. */
-    fill_cloud(bodies);
+    fill_distinct_cloud(bodies);
     Simulation *state = from_bodies(bodies, CLOUD_SIZE);
     SimulationView view = simulation_view(state);
     SolverOption tasks[] = {{"theta", "0.6"}, {"task_cutoff", "8"}};
@@ -1062,11 +1027,11 @@ static void test_parallel_barnes_hut(void)
     for (int threads = 1; threads <= 4; threads *= 2) {
         omp_set_num_threads(threads);
         assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, tasks, 2, &error));
-        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+        assert(!solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context));
         if (threads == 1) memcpy(baseline, actual, sizeof baseline);
         else assert(memcmp(baseline, actual, sizeof baseline) == 0);
         /* Re-evaluate through the same prepared workspace. */
-        solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+        assert(!solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context));
         assert(memcmp(baseline, actual, sizeof baseline) == 0);
         solver_destroy(&solver);
     }
@@ -1074,12 +1039,12 @@ static void test_parallel_barnes_hut(void)
     Solver other;
     assert(solver_create(&solver, "parallel-barnes-hut", CLOUD_SIZE, tasks, 2, &error));
     assert(solver_create(&other, "parallel-barnes-hut", CLOUD_SIZE, &exact, 1, &error));
-    solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+    assert(!solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context));
     double first[3][CLOUD_SIZE];
     memcpy(first, actual, sizeof first);
     for (size_t i = 0; i < CLOUD_SIZE; ++i) bodies[i].position.x += 10;
     simulation_destroy(check_force(&other, bodies, CLOUD_SIZE, 1e-11));
-    solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context);
+    assert(!solver.acceleration(&view, actual[0], actual[1], actual[2], solver.context));
     assert(memcmp(first, actual, sizeof first) == 0);
     solver_destroy(&solver); solver_destroy(&other);
     omp_set_num_threads(previous_threads);
@@ -1111,11 +1076,10 @@ void test_solver(void)
 #ifdef _OPENMP
     test_parallel_barnes_hut();
     test_fmm_thread_consistency();
-    test_fmm_parallel_fallback();
+    test_fmm_parallel_interaction_failure();
     test_n2_thread_consistency();
     test_trajectory_thread_consistency();
     test_barnes_hut_thread_consistency();
 #endif
-    test_barnes_hut_unrepresentable_tree();
-    test_fmm_fallback_contract();
+    test_unrepresentable_tree();
 }

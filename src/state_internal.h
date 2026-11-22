@@ -11,4 +11,6 @@ struct Simulation {
     double storage[];
 };
 
+const char *refresh_acceleration(Simulation *simulation, AccelerationSolver solver, void *context);
+
 #endif

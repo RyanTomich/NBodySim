@@ -107,7 +107,6 @@ for solver, integrator in [*((name, "leapfrog") for name in names), ("grouped-ba
         if solver == "fmm":
             assert status["order"] == summary["order"] == 4
             assert "direct_pair_cutoff" not in status
-            assert status["diagnostics"]["direct_fallbacks"] == 0
         assert runner["compare_n2"](binary, instance, folder, args)
         with (folder / "timing/distribution-error.csv").open() as source:
             distances = list(csv.DictReader(source))
@@ -121,6 +120,19 @@ for solver, integrator in [*((name, "leapfrog") for name in names), ("grouped-ba
             assert saved["integrator"] == integrator
             assert saved["force_evaluations_per_run"] == calls
             assert saved["steps"] == args.steps and saved["dt"] == args.dt
+
+for warmups in (0, 1):
+    args = SimpleNamespace(solver="fmm", theta=None, integrator="leapfrog",
+                           dt=0.0001, steps=2, samples=2, warmups=warmups)
+    with TemporaryDirectory(dir="build") as temporary:
+        timing = Path(temporary).resolve() / "timing"
+        overflow = Path("tests/data/aggregate_overflow.txt").resolve()
+        status, summary = runner["collect_timing"](binary, overflow, timing, args)
+        assert status["status"] == "failed" and summary is None
+        assert json.loads((timing / "status.json").read_text()) == status
+        assert (timing / "stderr.log").read_text().count("fmm: nonfinite multipole") == 1
+        assert not (timing / "final.txt").exists()
+        assert not (timing / "samples.csv").read_text()
 
 try:
     runner["solver_settings"](binary, instance, "unknown", None)

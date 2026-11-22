@@ -32,16 +32,15 @@ Barnes–Hut variants, and FMM.
   monopoles and leaf traversal helpers. `src/parallel_barnes_hut.c` owns its
   single-particle-leaf tree, summary tasks, and independent target walks.
 - `src/n2.c` implements the all-pairs solver, including reusable private OpenMP
-  acceleration buffers; `src/n2_internal.h` exposes the unchanged serial kernel
-  for FMM, serial Barnes–Hut, and particle-parallel Barnes–Hut fallbacks.
-  Unrepresentable grouped Barnes–Hut bounds or summaries produce `NaN` accelerations.
+  acceleration buffers. Only this backend calls `n2_accelerations_serial`.
+  Tree solvers report errors if their bounds or summaries are unrepresentable.
 - `src/io.*` handles instance files.
 - `src/octree.c` builds the bounded octree used by serial and grouped Barnes–Hut and FMM.
   Grouped Barnes–Hut validates every leaf member before reusing topology and refreshes
   all numerical summaries each call. Reuse is automatic; rebuilding occurs only
   when topology is unavailable or membership validation fails. Serial Barnes–Hut
   and FMM rebuild each call.
-- `src/laplace.*` owns the expansion interface and translations;
+- `src/fmm.c` owns the private expansion types and translation helper;
   `src/generated/` contains the order-four tables and arithmetic.
 - `src/main.c` parses CLI arguments and prepares the selected solver.
 - `tests/test_main.c` runs the public state and solver contract tests in
@@ -120,9 +119,9 @@ With at least 1,024 bodies and multiple workers, one team handles recursive
 tasks for disjoint target subtrees and target-body ranges in oversized leaves.
 The task grain is the body count divided by four times the actual team size,
 rounded up with a minimum of 64. Visit source children in octant order and
-join target tasks before returning from a split or invoking the direct fallback.
+join target tasks before returning success or failure from a split.
 Tree construction and validation, serial and grouped Barnes–Hut aggregation,
-FMM upward/downward passes, and FMM direct fallbacks stay serial. Leapfrog uses static parallel loops for
+and FMM upward/downward passes stay serial. Leapfrog uses static parallel loops for
 half-kick/drift and final half-kick, with implicit synchronization before and after the single force call
 outside those regions. Preserve that ordering and benchmark complete simulation
 time: the two parallel-region launches per step can cost more than they save on
@@ -224,9 +223,12 @@ Preserve leapfrog ordering: recompute initial acceleration on every nonempty,
 positive-step invocation, then half-kick, drift, evaluate forces, and half-kick.
 Preserve forward Euler ordering: advance position using the old velocity, advance
 velocity using the stored acceleration, then evaluate forces at the new positions.
-Publish accelerations only after the whole solver call. Callbacks depend on
+Both integrators use the private state refresh helper to publish accelerations
+only after a successful solver call. The callback and integrators return NULL
+on success or a static error message on failure. On error, reset the simulation
+before reuse because positions and velocities may have advanced. Callbacks depend on
 current masses and positions, not half-step velocities or previous accelerations.
-Returned velocities are full-step values; returned accelerations match final
+On success, returned velocities are full-step values; returned accelerations match final
 positions. Empty or zero-step calls leave state untouched and invoke no solver.
 Leapfrog is second-order for smooth forces; do not promise exact energy
 conservation or symplectic behavior for approximate tree forces. Preserve the

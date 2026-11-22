@@ -1,8 +1,8 @@
 #include "parse.h"
 #include "solver_internal.h"
+#include "simulation_view_internal.h"
 #include "octree_internal.h"
 #include "gravity_internal.h"
-#include "n2_internal.h"
 
 #include <assert.h>
 #include <math.h>
@@ -25,7 +25,7 @@ typedef struct {
 } BarnesHutConfig;
 
 typedef struct {
-    size_t calls, capacity_limited_leaves, bounds_fallbacks, aggregate_fallbacks;
+    size_t calls, capacity_limited_leaves;
     size_t source_node_visits, direct_evaluations, aggregate_evaluations;
 } BarnesHutTotals;
 
@@ -33,16 +33,11 @@ typedef struct {
     BarnesHutConfig config;
     Octree tree;
     GravityMonopole *monopoles;
-    bool bounds_fallback;
-    bool aggregate_fallback;
-    size_t source_node_visits; /* Source nodes visited during group discovery. */
-    size_t direct_evaluations; /* Directed particle contributions, excluding self. */
-    size_t aggregate_evaluations; /* Aggregate contributions across all targets. */
     BarnesHutTotals totals; /* Cumulative; caller may zero between runs. */
 } BarnesHutWorkspace;
 
 /* Add a particle (mass, position) or merge a child (mass, center_of_mass).
- * False means the aggregate is unrepresentable; discard it and fall back. */
+ * False means the aggregate is unrepresentable. */
 /* Incremental weighted means avoid forming mass * position. */
 static bool gravity_monopole_add(GravityMonopole *monopole, double mass, Vec3 position)
 {
@@ -99,7 +94,7 @@ static bool aggregate_tree(const SimulationView *state, BarnesHutWorkspace *work
             for (size_t p = node->begin; p < node->end; ++p) {
                 size_t i = workspace->tree.indices[p];
                 if (!gravity_monopole_add(monopole, state->w[i],
-                                          (Vec3){state->x[i], state->y[i], state->z[i]})) {
+                                          simulation_view_position(state, i))) {
                     return false;
                 }
             }
@@ -175,7 +170,7 @@ static void collect_sources(BarnesHutWorkspace *workspace, size_t index,
                             size_t *length)
 {
     const OctreeNode *node = &workspace->tree.nodes[index];
-    ++workspace->source_node_visits;
+    ++workspace->totals.source_node_visits;
     bool disjoint = node->end <= group->begin || group->end <= node->begin;
     if (node->is_leaf || (disjoint && accept_source(node, &workspace->monopoles[index],
                                                   bounds, workspace->config.theta))) {
@@ -204,16 +199,16 @@ static void evaluate_group(const SimulationView *state, double *ax, double *ay,
             if (node->is_leaf) {
                 sum = gravity_accumulate_sources(state, target, workspace->tree.indices,
                                                  node->begin, node->end, sum);
-                workspace->direct_evaluations += (node->end - node->begin)
+                workspace->totals.direct_evaluations += (node->end - node->begin)
                                               - (node->begin <= p && p < node->end);
             } else {
                 const GravityMonopole *monopole = &workspace->monopoles[sources[entry]];
                 Vec3 contribution = gravity_monopole_acceleration(monopole,
-                    (Vec3){state->x[target], state->y[target], state->z[target]});
+                    simulation_view_position(state, target));
                 sum.x += contribution.x;
                 sum.y += contribution.y;
                 sum.z += contribution.z;
-                ++workspace->aggregate_evaluations;
+                ++workspace->totals.aggregate_evaluations;
             }
         }
         ax[target] = sum.x;
@@ -222,23 +217,22 @@ static void evaluate_group(const SimulationView *state, double *ax, double *ay,
     }
 }
 
-static void evaluate(const SimulationView *state, double *ax, double *ay,
-                     double *az, BarnesHutWorkspace *workspace)
+static const char *gravity_barnes_hut(const SimulationView *state, double *ax, double *ay,
+                                      double *az, void *solver_context)
 {
-    workspace->source_node_visits = 0;
-    workspace->direct_evaluations = 0;
-    workspace->aggregate_evaluations = 0;
-
-    workspace->bounds_fallback = !octree_build(state, &workspace->tree);
-    workspace->aggregate_fallback = !workspace->bounds_fallback
-                                 && !aggregate_tree(state, workspace);
-    if (workspace->bounds_fallback || workspace->aggregate_fallback) {
-        /* Count directed contributions, even though n2 shares pairs. */
-        workspace->direct_evaluations = state->count * (state->count - 1);
-        n2_accelerations(state, ax, ay, az);
-        return;
+    BarnesHutWorkspace *workspace = solver_context;
+    if (state->count == 0 && !workspace) {
+        return NULL;
     }
-
+    assert(workspace && workspace->tree.count == state->count && workspace->tree.nodes);
+    ++workspace->totals.calls;
+    if (!octree_build(state, &workspace->tree)) {
+        return "serial-barnes-hut: cannot represent tree bounds.";
+    }
+    workspace->totals.capacity_limited_leaves += workspace->tree.capacity_limited_leaves;
+    if (!aggregate_tree(state, workspace)) {
+        return "serial-barnes-hut: cannot represent mass summary.";
+    }
     for (size_t n = 0; n < workspace->tree.node_count; ++n) {
         const OctreeNode *group = &workspace->tree.nodes[n];
         if (group->is_leaf) {
@@ -248,24 +242,7 @@ static void evaluate(const SimulationView *state, double *ax, double *ay,
             evaluate_group(state, ax, ay, az, workspace, group, length);
         }
     }
-}
-
-static void gravity_barnes_hut(const SimulationView *state, double *ax, double *ay,
-                         double *az, void *solver_context)
-{
-    BarnesHutWorkspace *workspace = solver_context;
-    if (state->count == 0 && !workspace) {
-        return;
-    }
-    assert(workspace && workspace->tree.count == state->count && workspace->tree.nodes);
-    evaluate(state, ax, ay, az, workspace);
-    ++workspace->totals.calls;
-    workspace->totals.capacity_limited_leaves += workspace->tree.capacity_limited_leaves;
-    workspace->totals.bounds_fallbacks += workspace->bounds_fallback;
-    workspace->totals.aggregate_fallbacks += workspace->aggregate_fallback;
-    workspace->totals.source_node_visits += workspace->source_node_visits;
-    workspace->totals.direct_evaluations += workspace->direct_evaluations;
-    workspace->totals.aggregate_evaluations += workspace->aggregate_evaluations;
+    return NULL;
 }
 
 static bool barnes_hut_create(void **solver_context, size_t count, const SolverOption *options,
@@ -331,8 +308,6 @@ static void barnes_hut_diagnostics(const void *solver_context, MetadataVisitor v
 #define REPORT(field) visit(#field, (MetadataValue){METADATA_SIZE, {.size = totals->field}}, visitor_context)
     REPORT(calls);
     REPORT(capacity_limited_leaves);
-    REPORT(bounds_fallbacks);
-    REPORT(aggregate_fallbacks);
     /* Historical result field, derived rather than counted twice. */
     visit("accepted_nodes", (MetadataValue){METADATA_SIZE, {.size = totals->aggregate_evaluations}}, visitor_context);
     REPORT(source_node_visits);

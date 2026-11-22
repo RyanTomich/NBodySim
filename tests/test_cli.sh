@@ -68,6 +68,10 @@ for solver in n2 serial-barnes-hut ${parallel_solver:+"$parallel_solver"} groupe
         cmp build/cli-default.txt build/cli-output.txt
     done
 done
+for solver in serial-barnes-hut ${parallel_solver:+"$parallel_solver"} grouped-barnes-hut fmm; do
+    expect_failure --solver "$solver" tests/data/aggregate_overflow.txt 0.01 1
+    grep -q "^$solver:" build/cli-error.txt
+done
 expect_failure tests/data/two_body.txt 0.01 1 --solver
 expect_failure tests/data/two_body.txt 0.01 1 --solver unknown
 expect_failure --solver barnes-hut tests/data/two_body.txt 0.01 1

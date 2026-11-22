@@ -2,6 +2,7 @@
 
 #include "parse.h"
 #include "solver_internal.h"
+#include "simulation_view_internal.h"
 #include "octree_internal.h"
 #include "gravity_internal.h"
 
@@ -165,7 +166,7 @@ static bool refresh_monopoles(const SimulationView *state, BarnesHutWorkspace *w
             for (size_t p = node->begin; p < node->end; ++p) {
                 size_t i = workspace->tree.indices[p];
                 if (!gravity_monopole_add(monopole, state->w[i],
-                                          (Vec3){state->x[i], state->y[i], state->z[i]})) {
+                                          simulation_view_position(state, i))) {
                     return false;
                 }
             }
@@ -282,7 +283,7 @@ static void evaluate_target_leaf(const SimulationView *state, double *ax, double
             } else {
                 const GravityMonopole *monopole = &workspace->monopoles[source_nodes[entry]];
                 Vec3 contribution = gravity_monopole_acceleration(monopole,
-                    (Vec3){state->x[target], state->y[target], state->z[target]});
+                    simulation_view_position(state, target));
                 sum.x += contribution.x;
                 sum.y += contribution.y;
                 sum.z += contribution.z;
@@ -367,39 +368,30 @@ static void evaluate_target_leaves(const SimulationView *state, double *ax, doub
     accumulate_worker_totals(workspace, actual_workers);
 }
 
-static void invalidate_accelerations(size_t count, double *ax, double *ay, double *az)
-{
-    /* The callback has no error return; publish an invalid result. */
-    for (size_t i = 0; i < count; ++i) {
-        ax[i] = ay[i] = az[i] = NAN;
-    }
-}
-
-static void gravity_barnes_hut(const SimulationView *state, double *ax, double *ay,
-                              double *az, void *solver_context)
+static const char *gravity_barnes_hut(const SimulationView *state, double *ax, double *ay,
+                                      double *az, void *solver_context)
 {
     BarnesHutWorkspace *workspace = solver_context;
     if (state->count == 0 && !workspace) {
-        return;
+        return NULL;
     }
     assert(workspace && workspace->tree.count == state->count && workspace->tree.nodes);
     ++workspace->totals.calls;
-    bool valid = ensure_topology(state, workspace);
-    if (valid) {
-        PROFILE_START(summaries_start);
-        valid = refresh_monopoles(state, workspace);
-        PROFILE_ADD(workspace->totals.summaries_seconds, summaries_start);
+    if (!ensure_topology(state, workspace)) {
+        return "grouped-barnes-hut: cannot represent tree bounds.";
     }
-    if (valid) {
-        PROFILE_START(evaluation_start);
-        evaluate_target_leaves(state, ax, ay, az, workspace);
-        PROFILE_ADD(workspace->totals.evaluation_seconds, evaluation_start);
-    } else {
-        invalidate_accelerations(state->count, ax, ay, az);
-    }
-    /* Count the current topology's limited leaves on every evaluation,
-     * including evaluations which reuse it. */
+    /* Include capacity-limited leaves on reused topology. */
     workspace->totals.capacity_limited_leaves += workspace->tree.capacity_limited_leaves;
+    PROFILE_START(summaries_start);
+    bool valid = refresh_monopoles(state, workspace);
+    PROFILE_ADD(workspace->totals.summaries_seconds, summaries_start);
+    if (!valid) {
+        return "grouped-barnes-hut: cannot represent mass summary.";
+    }
+    PROFILE_START(evaluation_start);
+    evaluate_target_leaves(state, ax, ay, az, workspace);
+    PROFILE_ADD(workspace->totals.evaluation_seconds, evaluation_start);
+    return NULL;
 }
 
 static void barnes_hut_destroy(void *solver_context)

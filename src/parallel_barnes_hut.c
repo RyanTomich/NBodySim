@@ -2,7 +2,6 @@
  * bottom-up task summaries, and independent parallel target walks.
  * All storage is private to a solver instance; evaluation allocates nothing. */
 #include "solver_internal.h"
-#include "n2_internal.h"
 #include "parse.h"
 
 #ifdef _OPENMP
@@ -23,8 +22,8 @@ typedef struct {
     size_t count, capacity, max_depth, task_cutoff;
     int nodes, actual_threads;
     double theta;
-    bool failed;
-    size_t calls, rebuilds, reuses, direct_fallbacks;
+    const char *tree_error;
+    size_t calls, rebuilds, reuses;
 } ParallelBarnesHut;
 
 static double coordinate(const SimulationView *s, int k, size_t i)
@@ -35,7 +34,10 @@ static double coordinate(const SimulationView *s, int k, size_t i)
 
 static int new_node(ParallelBarnesHut *w, const double lo[3], const double hi[3])
 {
-    if ((size_t)w->nodes == w->capacity) { w->failed = true; return -1; }
+    if ((size_t)w->nodes == w->capacity) {
+        w->tree_error = "parallel-barnes-hut: tree node capacity exhausted.";
+        return -1;
+    }
     int index = w->nodes++;
     ParallelNode *q = &w->tree[index];
     *q = (ParallelNode){.body = -1};
@@ -68,23 +70,26 @@ static int child_node(ParallelBarnesHut *w, int parent, int o)
 
 static void insert(ParallelBarnesHut *w, const SimulationView *s, int ni, int bi, size_t depth)
 {
-    if (w->failed) return;
+    if (w->tree_error) return;
     ParallelNode *q = &w->tree[ni];
     q->count++;
     bool has_child = false;
     for (int c = 0; c < 8; ++c) has_child |= q->child[c] >= 0;
     if (q->body < 0 && !has_child) { q->body = bi; return; }
-    if (depth >= w->max_depth) { w->failed = true; return; }
+    if (depth >= w->max_depth) {
+        w->tree_error = "parallel-barnes-hut: tree depth limit reached.";
+        return;
+    }
     if (q->body >= 0) {
         int old = q->body;
         q->body = -1;
         int child = child_node(w, ni, octant(q, s, old));
-        if (w->failed) return;
+        if (w->tree_error) return;
         insert(w, s, child, old, depth + 1);
     }
-    if (w->failed) return;
+    if (w->tree_error) return;
     int child = child_node(w, ni, octant(q, s, bi));
-    if (!w->failed) insert(w, s, child, bi, depth + 1);
+    if (!w->tree_error) insert(w, s, child, bi, depth + 1);
 }
 
 static bool contains(const ParallelNode *q, const SimulationView *s, int bi)
@@ -98,7 +103,7 @@ static bool contains(const ParallelNode *q, const SimulationView *s, int bi)
 
 static bool tree_is_valid(const ParallelBarnesHut *w, const SimulationView *s)
 {
-    if (!w->nodes || w->failed) return false;
+    if (!w->nodes || w->tree_error) return false;
     for (int i = 0; i < w->nodes; ++i)
         if (w->tree[i].body >= 0 && !contains(&w->tree[i], s, w->tree[i].body)) return false;
     return true;
@@ -108,7 +113,7 @@ static void rebuild(ParallelBarnesHut *w, const SimulationView *s)
 {
     double lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
     w->nodes = 0;
-    w->failed = false;
+    w->tree_error = NULL;
     ++w->rebuilds;
     for (size_t i = 0; i < s->count; ++i) for (int k = 0; k < 3; ++k) {
         double x = coordinate(s, k, i);
@@ -120,10 +125,13 @@ static void rebuild(ParallelBarnesHut *w, const SimulationView *s)
     for (int k = 0; k < 3; ++k) {
         double mid = (lo[k] + hi[k]) / 2;
         lo[k] = mid - side / 2; hi[k] = mid + side / 2;
-        if (!isfinite(lo[k]) || !isfinite(hi[k])) { w->failed = true; return; }
+        if (!isfinite(lo[k]) || !isfinite(hi[k])) {
+            w->tree_error = "parallel-barnes-hut: cannot represent tree bounds.";
+            return;
+        }
     }
     new_node(w, lo, hi);
-    for (size_t i = 0; i < s->count && !w->failed; ++i) insert(w, s, 0, (int)i, 0);
+    for (size_t i = 0; i < s->count && !w->tree_error; ++i) insert(w, s, 0, (int)i, 0);
 }
 
 static void summarize(ParallelBarnesHut *w, const SimulationView *s, int ni)
@@ -171,31 +179,29 @@ static void walk(const ParallelBarnesHut *w, const SimulationView *s, int bi, in
     for (int c = 0; c < 8; ++c) if (q->child[c] >= 0) walk(w, s, bi, q->child[c], a);
 }
 
-static void evaluate(const SimulationView *s, double *ax, double *ay, double *az, void *context)
+static const char *evaluate(const SimulationView *s, double *ax, double *ay, double *az, void *context)
 {
     ParallelBarnesHut *w = context;
     ++w->calls;
-    if (!s->count) return;
+    if (!s->count) return NULL;
     if (!tree_is_valid(w, s)) rebuild(w, s); else ++w->reuses;
-    if (!w->failed) {
-        #pragma omp parallel
+    if (w->tree_error) {
+        return w->tree_error;
+    }
+    #pragma omp parallel
+    {
+        #pragma omp single
         {
-            #pragma omp single
-            {
-                w->actual_threads = omp_get_num_threads();
-                summarize(w, s, 0);
-            }
-        }
-        for (int i = 0; i < w->nodes; ++i) {
-            ParallelNode *q = &w->tree[i];
-            if (!isfinite(q->mass)) w->failed = true;
-            for (int k = 0; k < 3; ++k) if (!isfinite(q->com[k])) w->failed = true;
+            w->actual_threads = omp_get_num_threads();
+            summarize(w, s, 0);
         }
     }
-    if (w->failed) {
-        ++w->direct_fallbacks;
-        n2_accelerations(s, ax, ay, az);
-        return;
+    for (int i = 0; i < w->nodes; ++i) {
+        const ParallelNode *q = &w->tree[i];
+        if (!isfinite(q->mass) || !isfinite(q->com[0]) ||
+            !isfinite(q->com[1]) || !isfinite(q->com[2])) {
+            return "parallel-barnes-hut: cannot represent mass summary.";
+        }
     }
     #pragma omp parallel for schedule(dynamic)
     for (size_t i = 0; i < s->count; ++i) {
@@ -203,6 +209,7 @@ static void evaluate(const SimulationView *s, double *ax, double *ay, double *az
         walk(w, s, (int)i, 0, a);
         ax[i] = a[0]; ay[i] = a[1]; az[i] = a[2];
     }
+    return NULL;
 }
 
 static void destroy(void *context)
@@ -256,7 +263,6 @@ static void diagnostics(const void *context, MetadataVisitor visit, void *visito
     visit("calls", (MetadataValue){METADATA_SIZE, {.size = w->calls}}, visitor_context);
     visit("rebuilds", (MetadataValue){METADATA_SIZE, {.size = w->rebuilds}}, visitor_context);
     visit("reuses", (MetadataValue){METADATA_SIZE, {.size = w->reuses}}, visitor_context);
-    visit("direct_fallbacks", (MetadataValue){METADATA_SIZE, {.size = w->direct_fallbacks}}, visitor_context);
 }
 
 const SolverDescriptor parallel_barnes_hut_solver = {

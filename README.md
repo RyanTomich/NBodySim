@@ -40,17 +40,20 @@ Barnes–Hut. FMM uses fourth-order expansions.
 | `grouped-barnes-hut` | OpenMP distributes target leaves, sharing one source traversal per leaf and reusing validated bucketed topology |
 
 Use one of the explicit names when updating commands that used `barnes-hut`.
-Serial and particle-parallel Barnes–Hut use direct fallback when their tree or
-summaries cannot be represented. Grouped Barnes–Hut reports nonfinite accelerations
-for that condition. Equal theta can yield different errors across the variants.
+If a tree solver cannot build its tree or represent a mass summary or expansion,
+the run stops. The CLI and benchmark driver print the solver name and reason to
+stderr and exit with failure. Equal theta can yield different errors across the variants.
 
 Use `--integrator leapfrog` to spell out the default. Leapfrog refreshes the
 initial acceleration, then evaluates forces once per step. Euler uses the
 acceleration fields in the input for its first velocity update, then evaluates
 forces once per step. Zero-step and empty runs preserve the state. The C API
 provides `simulate_with_solver` (leapfrog), `simulate_leapfrog_with_solver`,
-and `simulate_euler_with_solver`. Existing C callers on `main` can switch to
-`simulate_euler_with_solver` to retain forward Euler behavior.
+and `simulate_euler_with_solver`. These functions and the force callback return
+`NULL` on success or a static error message on failure. A failed evaluation
+leaves the last published accelerations in place. Positions and velocities may
+have advanced, so reset the simulation before continuing. The prepared solver
+can be reused with valid input.
 
 The final state is written to stdout in the input format, so it can be used to
 resume a simulation. Direct-force restarts reproduce uninterrupted runs; a newly
@@ -101,8 +104,7 @@ in serial traversal order. Smaller inputs and single-worker runs traverse inline
 
 A prepared solver must not be called concurrently. Tree construction and
 validation are serial. Only the particle-parallel Barnes–Hut backend uses
-OpenMP tasks for mass aggregation. FMM upward/downward passes and its direct
-fallback are serial.
+OpenMP tasks for mass aggregation. FMM upward and downward passes are serial.
 Leapfrog uses two static parallel loops per timestep: half-kick and drift,
 then the final half-kick. Every position update
 finishes before the force solver is called once outside those parallel regions;
@@ -820,17 +822,15 @@ unavailable or membership validation fails. At nonzero theta, reused and rebuilt
 trees may produce different approximations. Serial Barnes–Hut and FMM rebuild
 on every force call. Grouped Barnes–Hut's cumulative `capacity_limited_leaves`
 diagnostic counts the current topology's limited leaves on each evaluation,
-including reuse. If grouped tree bounds or mass summaries cannot be represented,
-the callback fills all acceleration outputs with `NaN`. A later call with valid
-data can recover.
+including reuse. Bucketed trees evaluate the bodies in an oversized leaf directly.
+The single-particle-leaf solver reports an error if its depth or node limit
+prevents it from separating particles.
 
 FMM builds the octree, accumulates multipole moments upward, traverses pairs of
 source and target cells, then propagates local expansions downward and evaluates
 them at each body. The pair traversal uses the full cell half-widths to decide
 when a multipole translation is safe and directly evaluates other leaf pairs.
-If the tree or expansion cannot be
-evaluated with finite arithmetic, FMM recomputes the forces with `n2` and
-records the event in `direct_fallbacks`.
+FMM reports which pass failed if an expansion or interaction is unrepresentable.
 
 Gravity uses normalized units (`G = 1`). Leapfrog is second-order for smooth
 forces; it does not conserve energy exactly, and approximate tree forces do not
@@ -847,7 +847,7 @@ invocation to account for changes through mutable state views.
 | `src/nbody.h`, `src/state.c`, `src/leapfrog.c`, `src/euler.c` | Public simulation interface, state ownership, and time stepping |
 | `src/solver.*` | Backend selection and lifecycle |
 | `src/n2.c`, `src/*_barnes_hut.c`, `src/fmm.c` | Gravity backends |
-| `src/gravity.c`, `src/octree.c`, `src/laplace.*` | Shared interactions, spatial tree, and FMM expansion calculations |
+| `src/gravity.c`, `src/octree.c`, `src/generated/` | Shared interactions, spatial tree, and generated fourth-order FMM arithmetic |
 | `bench/run.py`, `bench/driver.c` | Benchmark orchestration and measurement |
 | `tests/`, `tests/data/` | Regression tests and small fixtures |
 | `generate_instance.py`, `bench/data/` | Input generation and benchmark instances |
