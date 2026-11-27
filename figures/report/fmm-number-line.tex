@@ -1,0 +1,206 @@
+\documentclass[aspectratio=169,11pt]{beamer}
+\usetheme{default}
+\setbeamertemplate{navigation symbols}{}
+\usepackage{tikz}
+\title{The fast multipole method on a number line}
+
+% One horizontal unit represents one position unit on every number line.
+\newenvironment{diagram}{%
+  \begin{center}\begin{tikzpicture}[remember picture,x=.81cm,y=1cm, font=\small]
+  % Reserve the same vertical space on every frame so the bodies stay fixed.
+  \path (-.42,-.78) rectangle (16.42,2.64);
+  \begin{scope}[overlay,shift={(current page.center)},shift={(-8,0)}]
+}{\end{scope}\end{tikzpicture}\end{center}}
+\newcommand{\bodies}{\markbodies{2.5,3.5}{2.8pt}}
+\newcommand{\markbodies}[2]{%
+  \draw (0,0) -- (16,0);
+  \foreach \x in {0,2,...,16} \draw (\x,.06) -- (\x,-.065);
+  \foreach \x in {0,4,8,12,16} \node[below,font=\scriptsize] at (\x,-.46) {\x};
+  \foreach \x in {.5,1.5,2.5,3.5,4.5,6.5,7.5,10,13,15} \fill (\x,0) circle (1.9pt);
+  \foreach \x in {#1} \fill[structure.fg] (\x,0) circle (#2);}
+% Separate neighboring endpoints slightly so the brackets remain visible.
+\newcommand{\interval}[5][black]{%
+  \draw[#1] ({#2+.16},#4+.085) -- ({#2+.055},#4+.085)
+            -- ({#2+.055},#4-.085) -- ({#2+.16},#4-.085)
+            ({#2+.055},#4) -- ({#3-.055},#4)
+            ({#3-.16},#4+.085) -- ({#3-.055},#4+.085)
+            -- ({#3-.055},#4-.085) -- ({#3-.16},#4-.085);
+  \if\relax\detokenize{#5}\relax\else
+    \node[fill=white,text=#1,font=\footnotesize,inner sep=1pt]
+      at ({(#2+#3)/2},#4) {#5};
+  \fi}
+% Draw the branches first, behind the range labels.
+\newcommand{\branch}[4]{\draw[black!43,thin] (#1,#2) -- (#3,#4);}
+\newcommand{\splitcell}[4]{%
+  \branch{#1}{#2}{{#1-#3}}{#4}
+  \branch{#1}{#2}{{#1+#3}}{#4}}
+\newcommand{\leavesToBodies}{%
+  \foreach \c/\x in {1/.5,1/1.5,3/2.5,3/3.5,5/4.5,7/6.5,7/7.5,11/10,13/13,15/15}
+    {\branch{\c}{.48}{\x}{0}}}
+\newcommand{\pointlabels}{%
+  \foreach \x in {0.5,1.5,2.5,3.5,4.5,6.5,7.5,10,13,15}
+    \node[below=2pt,font=\scriptsize] at (\x,0) {\x};}
+\newcommand{\targetlabels}{%
+  \foreach \x in {2.5,3.5}
+    \node[below=2pt,text=structure.fg,font=\scriptsize] at (\x,0) {\x};}
+
+\begin{document}
+\begin{frame}[t]{FMM step 1: Build the binary tree}
+Bisect the number line three times. The two blue bodies share a leaf.
+\begin{diagram}
+  \splitcell{8}{2.40}{4}{1.76}
+  \foreach \c in {4,12} {\splitcell{\c}{1.76}{2}{1.12}}
+  \foreach \c in {2,6,10,14} {\splitcell{\c}{1.12}{1}{.48}}
+  \leavesToBodies
+  \interval{0}{16}{2.40}{root}
+  \foreach \x in {0,8} {\interval{\x}{\x+8}{1.76}{}}
+  \foreach \x in {0,4,8,12} {\interval{\x}{\x+4}{1.12}{}}
+  \foreach \x in {0,4,6,10,12,14} {\interval{\x}{\x+2}{.48}{}}
+  \interval[structure.fg]{2}{4}{.48}{target}
+  \interval{8}{10}{.48}{empty}
+  \bodies \pointlabels
+\end{diagram}
+\end{frame}
+
+\begin{frame}[t]{FMM step 2: Combine child summaries up to the root}
+Each bracket's dot places the group's mass at its center of mass (the monopole).
+\begin{diagram}
+  % Child-to-parent connections use centers of mass, not cell midpoints.
+  \foreach \c/\x in {1/.5,1/1.5,3/2.5,3/3.5,4.5/4.5,7/6.5,7/7.5,10/10,13/13,15/15}
+    {\branch{\c}{.48}{\x}{0}}
+  \foreach \c/\x in {2/1,2/3,{18.5/3}/4.5,{18.5/3}/7,10/10,14/13,14/15}
+    {\branch{{\c}}{1.12}{\x}{.48}}
+  \foreach \c/\x in {{26.5/7}/2,{26.5/7}/{18.5/3},{38/3}/10,{38/3}/14}
+    {\branch{{\c}}{1.76}{{\x}}{1.12}}
+  \foreach \c in {26.5/7,38/3} {\branch{6.45}{2.40}{{\c}}{1.76}}
+  \interval{0}{16}{2.40}{}
+  \foreach \x in {0,8} {\interval{\x}{\x+8}{1.76}{}}
+  \foreach \x in {0,4,8} {\interval{\x}{\x+4}{1.12}{}}
+  \interval[structure.fg]{12}{16}{1.12}{}
+  \foreach \x in {0,2,...,14} {\interval{\x}{\x+2}{.48}{}}
+  \foreach \x in {1,3,4.5,7,10,13,15} \fill (\x,.48) circle (1.9pt);
+  \foreach \x in {2,18.5/3,10} \fill ({\x},1.12) circle (2.3pt);
+  \fill[structure.fg] (14,1.12) circle (3.8pt);
+  \foreach \x in {26.5/7,38/3} \fill ({\x},1.76) circle (2.3pt);
+  \fill (6.45,2.40) circle (2.3pt);
+  \markbodies{13,15}{1.9pt}
+  \foreach \x in {13,15} \node[below=2pt,font=\scriptsize] at (\x,0) {$\x$};
+\end{diagram}
+\[
+  \underbrace{Q=(13-14)^2+(15-14)^2=2}_{\text{second moment of the two blue unit masses}}
+\]
+\centering $L$ leaves need $L-1$ merges. With $L=O(n)$ and fixed-order summaries, the upward pass takes $O(n)$ work.
+\end{frame}
+
+\begin{frame}[t]{FMM step 3: Classify interactions with the blue target leaf}
+The two halves touch at 8, so open both. Test their children at the next level.
+\begin{diagram}
+  \splitcell{8}{2.40}{4}{1.76}
+  \foreach \c in {4,12} {\splitcell{\c}{1.76}{2}{1.12}}
+  \foreach \c in {2,6} {\splitcell{\c}{1.12}{1}{.48}}
+  \foreach \c/\x in {1/.5,1/1.5,3/2.5,3/3.5,5/4.5,7/6.5,7/7.5}
+    {\branch{\c}{.48}{\x}{0}}
+  \foreach \c/\x in {10/10,14/13,14/15} {\branch{\c}{1.12}{\x}{0}}
+  \interval{0}{16}{2.40}{Open}
+  \interval{0}{8}{1.76}{Open $[0,8)$}
+  \interval{8}{16}{1.76}{Open $[8,16)$}
+  \foreach \x in {0,4} {\interval{\x}{\x+4}{1.12}{Open}}
+  \interval[structure.fg]{8}{12}{1.12}{Far $[8,12)$}
+  \interval[structure.fg]{12}{16}{1.12}{Far $[12,16)$}
+  \foreach \x in {0,2,4} {\interval{\x}{\x+2}{.48}{Direct}}
+  \interval[structure.fg]{6}{8}{.48}{Far}
+  \bodies \targetlabels
+\end{diagram}
+\begin{itemize}
+  \item \textbf{Direct.} In the same or adjacent leaves, sum body pairs. Skip self.
+  \item \textbf{Far.} With a full cell between source and target, use one group summary.
+\end{itemize}
+Three adjacent parents have at most six children, including the target cell and five others.
+The blue leaf has four candidates here. Constant work per cell gives $O(n)$ overall.
+\end{frame}
+
+% The mini-arrays identify the source of each contribution. The solver
+% accumulates coefficients of like powers into one local polynomial.
+\newcommand{\localterms}[1]{{\scriptsize $[\mspace{-2mu}#1\mspace{-2mu}]$}}
+\begin{frame}[t]{FMM step 4: Translate far summaries and pass their fields down}
+The blue leaf inherits $A',B'$ from its parent and receives $C'$ directly from $C$.
+\begin{diagram}
+  \splitcell{8}{2.40}{4}{1.76}
+  \foreach \c in {4,12} {\splitcell{\c}{1.76}{2}{1.12}}
+  \foreach \c in {2,6} {\splitcell{\c}{1.12}{1}{.48}}
+  \foreach \c/\x in {1/.5,1/1.5,3/2.5,3/3.5,5/4.5,7/6.5,7/7.5}
+    {\branch{\c}{.48}{\x}{0}}
+  \foreach \c/\x in {10/10,14/13,14/15} {\branch{\c}{1.12}{\x}{0}}
+  \foreach \leaf in {1,3} \draw[structure.fg] (2,1.12) -- (\leaf,.48);
+  \draw[structure.fg,dashed,->,>=stealth]
+    (6.87,.63) .. controls (6.30,.98) and (4.35,.98) .. (3.40,.67);
+  \interval{0}{16}{2.40}{root}
+  \foreach \x in {0,8} {\interval{\x}{\x+8}{1.76}{}}
+  \interval[structure.fg]{0}{4}{1.12}{\localterms{A'\mathord{|}B'}}
+  \interval{4}{8}{1.12}{}
+  \interval{8}{12}{1.12}{$A$}
+  \interval{12}{16}{1.12}{$B$}
+  \interval{0}{2}{.48}{}
+  \interval[structure.fg]{2}{4}{.48}{\localterms{A'\mathord{|}B'\mathord{|}C'}}
+  \interval{4}{6}{.48}{}
+  \interval{6}{8}{.48}{$C$}
+  \bodies \targetlabels
+\end{diagram}
+\centering
+\[
+  \begin{aligned}
+    A &= (M,c,Q)=(1,10,0),\qquad g_A(x)=\frac{1}{(10-x)^2}.\\
+    A'(x) &= g_A(2)+g_A'(2)(x-2)
+           =\frac{1}{64}+\frac{x-2}{256}.
+  \end{aligned}
+\]
+At width 4, $[0,4)$ touches $C$'s parent $[4,8)$, so open the pair.\\
+At width 2, $[4,6)$ separates $[2,4)$ and $C=[6,8)$, so translate $C$ there.
+\end{frame}
+
+% Source fields retain M and the central second moment Q. For a group to
+% the right, series coefficients at target center t, d = source center - t:
+% constant M/d^2 + 3Q/d^4; linear 2M/d^3 + 12Q/d^5.
+% A and B are expanded at 2, C at 3. Shifting to the leaf uses x-2=1+(x-3).
+\begin{frame}[t]{FMM step 5: Evaluate each far term and add the direct pull}
+Both blue bodies evaluate the same leaf polynomial at their own positions.
+\begin{diagram}
+  \branch{8}{2.40}{4}{1.76}
+  \branch{4}{1.76}{2}{1.12}
+  \branch{2}{1.12}{3}{.48}
+  \foreach \x in {2.5,3.5} \draw[structure.fg] (3,.48) -- (\x,0);
+  \interval{0}{16}{2.40}{root}
+  \interval{0}{8}{1.76}{}
+  \interval{0}{4}{1.12}{\localterms{A'\mathord{|}B'}}
+  \interval[structure.fg]{2}{4}{.48}{\localterms{A'\mathord{|}B'\mathord{|}C'}}
+  \node[anchor=west] at (6,.78) {$a(x)\approx A'(x)+B'(x)+C'(x)+a_{\rm direct}(x)$};
+  \bodies \targetlabels
+
+  % The two component plots share an acceleration scale and a zero baseline.
+  \begin{scope}[shift={(8,-.78)},x=1cm,y=1cm,font=\footnotesize]
+    \foreach \offset/\body/\aval/\bval/\cval/\farval/\nearval/\net in {
+      -3.05/2.5/.01758/.01538/.09668/.12964/0/.12964,
+       3.15/3.5/.02148/.01780/.16504/.20432/-.36111/-.15679}{
+      \begin{scope}[shift={(\offset,0)}]
+        \node at (.38,-.15) {$x=\body$};
+        \draw[gray] (0,-.26) -- (0,-2.92);
+        \foreach \y/\v/\col in {-.49/\aval/black,-.94/\bval/black,-1.39/\cval/black,
+          -1.84/\farval/black,-2.29/\nearval/black,-2.74/\net/structure.fg}{
+          \ifdim\v pt=0pt
+            \fill (0,\y) circle (1.2pt);
+          \else
+            \draw[\col,line width=1.6pt] (0,\y) -- ({5.3*\v},\y);
+          \fi
+          \node[anchor=west,text=\col] at (1.2,\y)
+            {\ifdim\v pt=0pt $0.00000$\else
+            $\pgfmathprintnumber[fixed,fixed zerofill,precision=5,showpos]{\v}$\fi};
+        }
+      \end{scope}}
+    \foreach \y/\lab in {-.49/$A'(x)$,-.94/$B'(x)$,-1.39/$C'(x)$,
+      -1.84/Far sum,-2.29/Direct,-2.74/Total}
+      \node[anchor=east] at (-4.35,\y) {\lab};
+    \node at (0,-3.37) {Exact all-pairs totals\quad $a(2.5)=+0.13575$\qquad $a(3.5)=-0.14519$\quad (rounded)};
+  \end{scope}
+\end{diagram}
+\end{frame}
+\end{document}
