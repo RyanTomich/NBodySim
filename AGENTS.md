@@ -103,8 +103,8 @@ assertions enabled. Link-time optimization (`-flto`) defaults to `LTO=1` for
 every target and requires compiler/linker support; failures do not silently
 disable it. Use `make LTO=0` for a non-LTO build, cleaning before switching
 settings. `make print-config` reports the selected LTO setting and flags.
-`OPENMP=1` is the default, with `OMPFLAGS` and `OMPLIBS` overrides as described
-in `README.md`. Use `make OPENMP=0` for a serial build, which omits the
+`OPENMP=1` is the default. Override `OMPFLAGS` and `OMPLIBS` to change the
+OpenMP compiler and linker flags. Use `make OPENMP=0` for a serial build, which omits the
 particle-parallel backend and runs grouped Barnes–Hut with one worker.
 Clean before changing OpenMP settings. Set `OMP_NUM_THREADS` before solver
 creation: prepared `n2` and grouped Barnes–Hut solvers reserve that maximum worker count.
@@ -201,7 +201,7 @@ every nonempty log as an error. Preserve prior runs; do not recreate
 source snapshots, manifests, hash files, or command journals. The directory hash
 identifies HEAD; the saved binary also includes any uncommitted code changes.
 
-See [README.md](README.md#benchmarking) for the complete layout.
+The [quickstart](README.md#read-the-results) shows where to find timing and final state for a two-body run.
 
 ## Coding Style & Naming Conventions
 
