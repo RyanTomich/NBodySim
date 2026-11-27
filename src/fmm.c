@@ -1,7 +1,7 @@
-#include "gravity_internal.h"
-#include "octree_internal.h"
-#include "solver_internal.h"
-#include "simulation_view_internal.h"
+#include "gravity.h"
+#include "octree.h"
+#include "solver.h"
+#include "nbody.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -27,7 +27,7 @@ typedef struct {
     int a, b, c, factor, child_divisor;
 } CartesianSplit;
 
-#include "generated/laplace_order4_internal.h"
+#include "generated/laplace_order4.h"
 
 typedef struct {
     Octree tree;

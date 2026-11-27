@@ -1,7 +1,7 @@
 /* Rushil's Barnes-Hut algorithm as a prepared solver: reusable topology,
  * bottom-up task summaries, and independent parallel target walks.
  * All storage is private to a solver instance; evaluation allocates nothing. */
-#include "solver_internal.h"
+#include "solver.h"
 #include "parse.h"
 
 #ifdef _OPENMP

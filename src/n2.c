@@ -1,5 +1,4 @@
-#include "gravity_internal.h"
-#include "solver_internal.h"
+#include "solver.h"
 
 #include <assert.h>
 #include <math.h>
@@ -65,8 +64,12 @@ static inline void evaluate_row(const SimulationView *state, size_t i,
     az[i] = sum_z;
 }
 
-void n2_accelerations_serial(const SimulationView *state, double *restrict ax,
-                             double *restrict ay, double *restrict az)
+/* Serial kernel: evaluate each unordered pair once in source-index order.
+ * Outputs need not be initialized and must be disjoint from each other and state.
+ * State is read-only; coincident positions contribute zero. No allocation.
+ */
+static void n2_accelerations_serial(const SimulationView *state, double *restrict ax,
+                                    double *restrict ay, double *restrict az)
 {
     const size_t count = state->count;
     if (count == 0) {

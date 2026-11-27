@@ -61,7 +61,7 @@
 <text x="1080" y="608">bounded spatial hierarchy</text>
 </g>
 <g id="GEN" font-family="Arial, Helvetica, sans-serif" font-size="15" text-anchor="middle" fill="#1e293b"><rect x="1200" y="560" width="290" height="60" rx="6" fill="#eef2ff" stroke="#818cf8" stroke-width="1.5"/>
-<text x="1345" y="585">generated/laplace_order4_internal.h</text>
+<text x="1345" y="585">generated/laplace_order4.h</text>
 <text x="1345" y="608">unrolled order-4 translation</text>
 </g>
 </svg>

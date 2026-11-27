@@ -1,4 +1,4 @@
-#include "solver_internal.h"
+#include "solver.h"
 #include <string.h>
 
 static const SolverDescriptor *const registry[] = {

@@ -1,8 +1,8 @@
 #include "parse.h"
-#include "solver_internal.h"
-#include "simulation_view_internal.h"
-#include "octree_internal.h"
-#include "gravity_internal.h"
+#include "solver.h"
+#include "nbody.h"
+#include "octree.h"
+#include "gravity.h"
 
 #include <assert.h>
 #include <math.h>

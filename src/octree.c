@@ -1,4 +1,4 @@
-#include "octree_internal.h"
+#include "octree.h"
 #include <float.h>
 #include <math.h>
 #include <stdint.h>

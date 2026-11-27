@@ -1,7 +1,6 @@
 #include "solver.h"
 #include "io.h"
 #include "parse.h"
-#include "integrator_internal.h"
 #include "nbody.h"
 
 #include <stdio.h>

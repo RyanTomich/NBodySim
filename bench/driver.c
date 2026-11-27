@@ -3,7 +3,7 @@
 #include "solver.h"
 #include "io.h"
 #include "parse.h"
-#include "integrator_internal.h"
+#include "nbody.h"
 #include "step_timing.h"
 
 #include <assert.h>

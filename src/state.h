@@ -1,5 +1,5 @@
-#ifndef STATE_INTERNAL_H
-#define STATE_INTERNAL_H
+#ifndef NBODY_STATE_H
+#define NBODY_STATE_H
 #include "nbody.h"
 
 struct Simulation {

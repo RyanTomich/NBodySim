@@ -1,5 +1,4 @@
-#include "state_internal.h"
-#include "integrator_internal.h"
+#include "state.h"
 #include <string.h>
 #ifdef NBODY_BENCH_STEPS
 #include "step_timing.h"

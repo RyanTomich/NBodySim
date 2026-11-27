@@ -1,5 +1,5 @@
-#ifndef OCTREE_INTERNAL_H
-#define OCTREE_INTERNAL_H
+#ifndef NBODY_OCTREE_H
+#define NBODY_OCTREE_H
 #include "nbody.h"
 
 #define OCTREE_MAX_DEPTH 64

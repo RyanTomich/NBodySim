@@ -20,6 +20,11 @@ typedef struct {
     const double *ax, *ay, *az;
 } SimulationView;
 
+static inline Vec3 simulation_view_position(const SimulationView *state, size_t body)
+{
+    return (Vec3){state->x[body], state->y[body], state->z[body]};
+}
+
 /* One allocation owns the private header and thirteen contiguous arrays. Initialize the ten state arrays before use.
  * Creation failure sets *simulation to NULL; zero count is valid.
  * Destroy accepts NULL. Handles must not be copied as independent owners.
@@ -47,6 +52,10 @@ MutableSimulationView simulation_mutable_view(Simulation *simulation);
  */
 typedef const char *(*AccelerationSolver)(const SimulationView *state, double *ax,
                                           double *ay, double *az, void *context);
+
+typedef const char *(*Integrate)(Simulation *, double, size_t, AccelerationSolver, void *);
+/* NULL selects the default. Unknown names give a null function pointer. */
+Integrate parse_integrator(const char *name);
 
 /* Shared kick-drift-kick leapfrog loop with a whole-system acceleration solver.
  * Positive finite dt required. Each nonempty, positive-step call recomputes

@@ -770,5 +770,5 @@ invocation to account for changes through mutable state views.
 
 See the [architecture diagram](docs/architecture.mmd) and
 [infrastructure diagram](docs/infrastructure.mmd) for module relationships.
-Public headers document interfaces; `*_internal.h` files contain implementation
-details. [AGENTS.md](AGENTS.md) contains contributor workflow and design constraints.
+Module headers document shared interfaces. `src/nbody.h` exposes simulation views,
+and `src/state.h` defines the storage layout used by the integrators. [AGENTS.md](AGENTS.md) contains contributor workflow and design constraints.

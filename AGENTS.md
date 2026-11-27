@@ -26,8 +26,9 @@ Barnes–Hut variants, and FMM.
   `src/leapfrog.c` implements kick-drift-kick leapfrog and `src/euler.c` implements forward Euler.
 - `src/state.c` owns private storage and constructs borrowed array views.
 - `src/solver.*` defines the shared preparation, destruction, and metadata interface.
-  Keep representation details in `*_internal.h`; executables use public headers.
-- `src/gravity.c` and `src/gravity_internal.h` provide shared direct gravity interactions and source-range accumulation.
+  Backend descriptors live in `src/solver.h`. Keep the simulation storage layout in
+  `src/state.h`; executables access state through the views in `src/nbody.h`.
+- `src/gravity.c` and `src/gravity.h` provide shared direct gravity interactions and source-range accumulation.
   `src/serial_barnes_hut.c` and `src/grouped_barnes_hut.c` own their private
   monopoles and leaf traversal helpers. `src/parallel_barnes_hut.c` owns its
   single-particle-leaf tree, summary tasks, and independent target walks.
@@ -70,7 +71,7 @@ For order-four arithmetic changes, edit `generate_fmm_order4.py` and regenerate
 the checked-in header instead of editing generated expressions by hand:
 
 ```sh
-python3 generate_fmm_order4.py > src/generated/laplace_order4_internal.h
+python3 generate_fmm_order4.py > src/generated/laplace_order4.h
 ```
 
 Add behavioral regression coverage for numerical or interface changes, run
