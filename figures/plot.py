@@ -712,7 +712,7 @@ def prepare_figures(paths, baseline=None):
         if path.is_file():
             kind = path.name
         else:
-            candidates = [name for name in ("phase-summary.csv", "comparison.csv", "solver-sweep.csv", "parallel-sweep.csv", "accuracy-tradeoff.csv", "timing-summary.csv")
+            candidates = [name for name in ("phase-summary.csv", "comparison.csv", "solver-sweep.csv", "parallel-sweep.csv", "timing-summary.csv")
                           if (directory / name).is_file()]
             if len(candidates) > 1:
                 raise ValueError("Ambiguous dataset {}; pass a specific summary CSV".format(directory))
@@ -720,8 +720,6 @@ def prepare_figures(paths, baseline=None):
         if kind == "phase-summary.csv":
             jobs.append(("phase-shares", draw_phase_shares,
                          read_shares(directory / kind)))
-        elif kind == "accuracy-tradeoff.csv":
-            raise ValueError("Accuracy tradeoff plots have been removed; use --compare-states ACTUAL REFERENCE")
         elif kind == "solver-sweep.csv":
             jobs.append(("solver-sweep", draw_solver_sweep, load_solver_sweep(directory)))
         elif kind == "parallel-sweep.csv":

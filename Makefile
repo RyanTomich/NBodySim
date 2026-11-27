@@ -86,8 +86,12 @@ build/bench_rebound: bench/comparison/rebound_driver.c src/io.c src/parse.c src/
 build/bench_steps: $(BENCH_SOURCES) $(HEADERS) Makefile | build
 	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) -DNBODY_BENCH_STEPS -Ibench -Isrc $(BENCH_SOURCES) $(LDLIBS) -o $@
 
-build/bench_steps_openmp: $(BENCH_SOURCES) $(HEADERS) Makefile | build
-	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -DNBODY_BENCH_STEPS -DNBODY_BENCH_OPENMP -Ibench -Isrc $(BENCH_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
+.PHONY: sweep-binary
+sweep-binary: output = "$${SWEEP_BINARY:?Set SWEEP_BINARY to the output path}"
+build/bench_steps_openmp: output = $@
+build/bench_steps_openmp: | build
+sweep-binary build/bench_steps_openmp: $(BENCH_SOURCES) $(HEADERS) Makefile
+	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -DNBODY_BENCH_STEPS -DNBODY_BENCH_OPENMP -Ibench -Isrc $(BENCH_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $(output)
 
 build/tests: $(TEST_SOURCES) $(HEADERS) Makefile | build
 	$(CC) $(CPPFLAGS) $(LDFLAGS) $(CFLAGS) $(OPENMP_FLAGS) -Isrc $(TEST_SOURCES) $(LDLIBS) $(OPENMP_LIBS) -o $@
@@ -105,7 +109,6 @@ test: all build/tests build/bench_steps
 	python3 tests/test_distribution.py
 	python3 tests/test_profile_barnes_hut.py
 	python3 tests/test_solver_sweep.py
-	python3 tests/test_accuracy_tradeoff.py
 
 ifeq ($(OPENMP),1)
 test: build/bench_steps_openmp

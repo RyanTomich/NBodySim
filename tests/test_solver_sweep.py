@@ -17,11 +17,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bench"))
 sys.path.insert(0, str(ROOT / "figures"))
 import compare_solvers as sweep
+import engaging
 import run as runner
 from plot import draw_parallel_sweep, load_solver_sweep, load_parallel_sweep, prepare_figures
 
 
 class SolverSweepTests(unittest.TestCase):
+    def test_relative_position_error_with_zero_reference_norm(self):
+        reference = [[1.0] + [0.0] * 9]
+        displaced = [[1.0, 1.0] + [0.0] * 8]
+        self.assertEqual(runner.trajectory_errors(reference, reference)[0]["relative_l2_error"], 0)
+        self.assertIsNone(runner.trajectory_errors(displaced, reference)[0]["relative_l2_error"])
+
     def test_default_workload(self):
         args = sweep.parse_args([])
         self.assertEqual(args.bodies, [1000, 5000, 10000, 20000, 50000])
@@ -75,6 +82,56 @@ class SolverSweepTests(unittest.TestCase):
                               for t in (1, 4, 8, 16)])
         self.assertEqual(sweep.configurations(100000, True, ["fmm", "n2"], [4, 1]),
                          [("n2", 1), ("n2", 4), ("fmm", 1), ("fmm", 4)])
+
+    def test_engaging_array_partitions_every_configuration(self):
+        args = sweep.parse_args(["--engaging"])
+        points = sweep.sweep_status(args)["settings"]["configurations"]
+        self.assertEqual(engaging.assign_tasks(points), 7)
+        groups = [[(p["bodies"], p["solver"], p["threads"]) for p in points if p["array_task"] == i]
+                  for i in range(7)]
+        self.assertEqual([len(group) for group in groups], [36, 3, 4, 4, 2, 4, 4])
+        self.assertEqual({n for n, _, _ in groups[0]}, {1000, 5000, 10000})
+        self.assertEqual([set((n, s) for n, s, _ in group) for group in groups[1:]],
+                         [{(n, s)} for n in (50000, 100000) for s in args.solvers])
+
+    def test_engaging_worker_node_selection(self):
+        with patch.object(subprocess, "check_output", return_value="node1 2 48\nnode2 2 96\n"):
+            self.assertEqual(engaging.worker_nodes("mit_normal"), ["--exclude=node2"])
+        with patch.object(subprocess, "check_output", return_value="node2 2 96\n"):
+            with self.assertRaisesRegex(ValueError, "No dual-socket"):
+                engaging.worker_nodes("mit_normal")
+
+    @unittest.skipUnless((ROOT / "build/bench_steps_openmp").exists(), "requires OpenMP build")
+    def test_engaging_array_build_workers_and_merge(self):
+        with TemporaryDirectory(prefix="array test ") as temporary, patch.dict(os.environ, {
+                "SLURM_JOB_PARTITION": "mit_normal", "SLURM_JOB_ID": "41", "NBODY_SHARED_NODES": "0"}), \
+                patch.object(engaging, "worker_nodes", return_value=[]), \
+                patch.object(engaging, "submit_job", side_effect=["42", "43"]) as submit_job, \
+                patch.object(engaging, "SMALL_SWEEP_LIMIT", 16), \
+                patch.object(engaging, "worker_placement", return_value={}), patch("builtins.print"):
+            engaging.submit(["--bodies", "16", "32", "--threads", "1", "4", "--steps", "2",
+                             "--samples", "2", "--results-dir", temporary])
+            directory = next(Path(temporary).iterdir())
+            array, merge = [call.args[0] for call in submit_job.call_args_list]
+            self.assertIn("--array=0-3%4", array)
+            self.assertIn("--exclusive", array)
+            self.assertIn("--dependency=afterok:41", array)
+            self.assertIn("--dependency=afterany:42", merge)
+            # Missing or interrupted elements must never produce a successful sweep.
+            engaging.worker(directory, 3)
+            engaging.worker(directory, 0)
+            with self.assertRaisesRegex(ValueError, "Incomplete task 1"):
+                engaging.merge(directory)
+            self.assertFalse((directory / "parallel-sweep.csv").exists())
+            engaging.worker(directory, 2)
+            engaging.worker(directory, 3)  # Whole curve is safe to retry.
+            engaging.worker(directory, 1)
+            engaging.merge(directory)
+            status, rows = load_parallel_sweep(directory)
+            self.assertEqual(status["status"], "ok")
+            self.assertEqual(len(rows), 12)
+            self.assertTrue(all(str(row["reference_threads"]) == "1" for row in rows))
+            self.assertTrue((directory / "32/fmm-4threads/distribution-error.csv").is_file())
 
     @unittest.skipUnless((ROOT / "build/bench_steps_openmp").exists(), "requires OpenMP build")
     def test_warm_timing_only_subset_loads_without_reference(self):

@@ -68,6 +68,7 @@ def check_placement(required):
     if len(sockets) != 1 or len(cores) < required or len(cores) != len(cpus):
         raise ValueError("Unsuitable job-step affinity {} for {} physical cores on one socket".format(
             cpus, required))
+    return {"cpus": cpus, "socket": next(iter(sockets)), "governors": sorted(governors)}
 
 
 @contextmanager
@@ -166,7 +167,7 @@ def collect(binary, instance, case, solver, args, threads=1):
         status["force_evaluations_per_run"] = runner.force_evaluations(integrator, args.steps, len(final))
         runner.driver_metadata(case, status)
         runner.write_csv(case / "steps.csv", ["sample", "step", "seconds"], steps)
-        status["status"] = "ok"
+        status.update(summary, status="ok")
         return summary, final
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         status["error"] = str(error)
@@ -176,8 +177,7 @@ def collect(binary, instance, case, solver, args, threads=1):
         runner.write_json(case / "status.json", status)
 
 
-def experiment(args):
-    directory = runner.create_experiment_directory(args.results_dir)
+def sweep_status(args):
     suite = "parallel-sweep" if args.parallel else "solver-sweep"
     max_speed = 0 if args.distribution == "clusters" else 3
     integrator = getattr(args, "integrator", "leapfrog")
@@ -194,28 +194,61 @@ def experiment(args):
                 "generator": {"distribution": args.distribution,
                               "L": 10 if args.distribution == "uniform" else None,
                               "w_min": 1, "w_max": 100, "v_max": max_speed, "a_max": 0}}
-    status = {"status": "running", "suite": suite, "settings": settings,
-              "started": runner.now(), "error_bars": "whole_run_sample_sd"}
+    return {"status": "running", "suite": suite, "settings": settings,
+            "started": runner.now(), "error_bars": "whole_run_sample_sd"}
+
+
+def generate_input(directory, count, args):
+    folder = directory / str(count)
+    folder.mkdir()
+    instance = folder / "input.txt"
+    command = [sys.executable, runner.ROOT / "generate_instance.py", "--n", str(count),
+               "--distribution", args.distribution, "--L", "10",
+               "--w-min", "1", "--w-max", "100", "--v-max", str(0 if args.distribution == "clusters" else 3),
+               "--a-max", "0", "--seed", str(args.seed), "--output", instance]
+    if runner.run_logged(command, folder, stdout="generation.stdout.log",
+                         stderr="generation.stderr.log"):
+        raise RuntimeError("Input generation failed; see " + str(folder))
+    return instance
+
+
+def result_row(args, count, solver, threads, case, summary, final, reference, reference_threads):
+    distribution = {}
+    errors = []
+    if reference is not None:
+        distribution = runner.save_distribution_errors(case, final, reference)
+        errors = runner.trajectory_errors(final, reference)
+        runner.write_csv(case / "error.csv", list(errors[0]), errors)
+    row = {"bodies": count, "solver": solver, "threads": threads, "steps": args.steps,
+           "dt": args.dt, "samples": args.samples, "integrator": args.integrator,
+           "force_evaluations_per_run": runner.force_evaluations(args.integrator, args.steps, count),
+           "reference_threads": reference_threads,
+           "theta": args.theta if solver in runner.BARNES_HUT_SOLVERS else None,
+           "order": runner.FMM_ORDER if solver == "fmm" else None, **summary, **distribution}
+    if args.parallel:
+        row.update(requested_threads=threads, effective_threads=threads)
+    for error in errors:
+        row[error["field"] + "_relative_l2"] = error["relative_l2_error"]
+        row[error["field"] + "_rms"] = error["rms_error"]
+    return row
+
+
+def experiment(args):
+    directory = runner.create_experiment_directory(args.results_dir)
+    status = sweep_status(args)
+    suite = status["suite"]
     runner.write_json(directory / "status.json", status)
     rows = []
     try:
         if args.check_placement:
-            check_placement(max(team for points in cases.values() for _, team in points))
+            check_placement(max(case["threads"] for case in status["settings"]["configurations"]))
         binary = build(directory, args.parallel)
         for count in args.bodies:
-            folder = directory / str(count)
-            folder.mkdir()
-            instance = folder / "input.txt"
-            command = [sys.executable, runner.ROOT / "generate_instance.py", "--n", str(count),
-                       "--distribution", args.distribution, "--L", "10",
-                       "--w-min", "1", "--w-max", "100", "--v-max", str(max_speed),
-                       "--a-max", "0", "--seed", str(args.seed), "--output", instance]
-            if runner.run_logged(command, folder, stdout="generation.stdout.log",
-                                 stderr="generation.stderr.log"):
-                raise RuntimeError("Input generation failed; see " + str(folder))
+            instance = generate_input(directory, count, args)
+            folder = instance.parent
             reference = None
             reference_threads = None
-            for solver, threads in cases[count]:
+            for solver, threads in configurations(count, args.parallel, args.solvers, args.threads, args.engaging):
                 print("N={} {}: {} runs × {} steps, {} threads".format(
                     count, solver, args.samples, args.steps, threads), flush=True)
                 case = folder / ("{}-{}threads".format(solver, threads) if args.parallel else solver)
@@ -223,23 +256,8 @@ def experiment(args):
                 if solver == "n2" and reference is None:
                     reference = final
                     reference_threads = threads
-                distribution = {}
-                errors = []
-                if reference is not None:
-                    distribution = runner.save_distribution_errors(case, final, reference)
-                    errors = runner.trajectory_errors(final, reference)
-                    runner.write_csv(case / "error.csv", list(errors[0]), errors)
-                row = {"bodies": count, "solver": solver, "threads": threads, "steps": args.steps,
-                       "dt": args.dt, "samples": args.samples, "integrator": integrator,
-                       "force_evaluations_per_run": runner.force_evaluations(integrator, args.steps, count),
-                       "reference_threads": reference_threads,
-                       "theta": args.theta if solver in runner.BARNES_HUT_SOLVERS else None,
-                       "order": runner.FMM_ORDER if solver == "fmm" else None, **summary, **distribution}
-                if args.parallel:
-                    row.update(requested_threads=threads, effective_threads=threads)
-                for error in errors:
-                    row[error["field"] + "_relative_l2"] = error["relative_l2_error"]
-                    row[error["field"] + "_rms"] = error["rms_error"]
+                row = result_row(args, count, solver, threads, case, summary, final,
+                                 reference, reference_threads)
                 rows.append(row)
                 fields = dict.fromkeys(key for result in rows for key in result)
                 runner.write_csv(directory / (suite + ".csv"), list(fields), rows)
